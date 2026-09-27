@@ -12,6 +12,7 @@
 <?import javafx.scene.control.MenuItem?>
 <?import javafx.scene.control.RadioMenuItem?>
 <?import javafx.scene.control.Separator?>
+<?import javafx.scene.control.SeparatorMenuItem?>
 <?import javafx.scene.control.SplitPane?>
 <?import javafx.scene.control.Tab?>
 <?import javafx.scene.control.TabPane?>
@@ -48,6 +49,17 @@
                         <MenuItem mnemonicParsing="false" onAction="#pasteImageMenuClick" text="粘贴局面图片" />
                         <MenuItem mnemonicParsing="false" onAction="#importImageMenuClick" text="图片导入局面" />
                         <MenuItem mnemonicParsing="false" onAction="#exportImageMenuClick" text="局面导出图片" />
+                    </items>
+                </Menu>
+                <Menu mnemonicParsing="false" text="模式">
+                    <items>
+                        <RadioMenuItem fx:id="menuOfXiangqiMode" mnemonicParsing="false" onAction="#gameModeSelected" text="象棋">
+                            <toggleGroup>
+                                <ToggleGroup fx:id="gameModeGroup" />
+                            </toggleGroup>
+                        </RadioMenuItem>
+                        <RadioMenuItem fx:id="menuOfJieqiMode" mnemonicParsing="false" onAction="#gameModeSelected" text="揭棋" toggleGroup="$gameModeGroup" />
+                        <SeparatorMenuItem mnemonicParsing="false" />
                     </items>
                 </Menu>
                 <Menu mnemonicParsing="false" text="棋谱">
@@ -94,6 +106,10 @@
                                     </toggleGroup>
                                 </RadioMenuItem>
                                 <RadioMenuItem fx:id="menuOfCustomBoard" mnemonicParsing="false" onAction="#boardStyleSelected" text="红黑" toggleGroup="$boardStyle1" />
+                                <RadioMenuItem fx:id="menuOfModernBoard" mnemonicParsing="false" onAction="#boardStyleSelected" text="现代木色" toggleGroup="$boardStyle1" />
+                                <RadioMenuItem fx:id="menuOfWoodBoard" mnemonicParsing="false" onAction="#boardStyleSelected" text="经典木纹" toggleGroup="$boardStyle1" />
+                                <RadioMenuItem fx:id="menuOfDarkBoard" mnemonicParsing="false" onAction="#boardStyleSelected" text="墨玉（深色）" toggleGroup="$boardStyle1" />
+                                <RadioMenuItem fx:id="menuOfJadeBoard" mnemonicParsing="false" onAction="#boardStyleSelected" text="青瓷" toggleGroup="$boardStyle1" />
                             </items>
                         </Menu>
                         <Menu mnemonicParsing="false" text="棋盘大小">
@@ -197,6 +213,7 @@
                             </opaqueInsets>
                         </Button>
                         <Separator orientation="VERTICAL" prefHeight="200.0" />
+                        <ComboBox fx:id="modeComboBox" maxHeight="-Infinity" maxWidth="-Infinity" minHeight="-Infinity" minWidth="-Infinity" onAction="#modeComboBoxChanged" prefHeight="24.0" prefWidth="88.0" stylesheets="@../style/combobox.css" />
                         <ComboBox fx:id="linkComboBox" editable="true" maxHeight="-Infinity" maxWidth="-Infinity" minHeight="-Infinity" minWidth="-Infinity" prefHeight="22.0" prefWidth="89.0" stylesheets="@../style/combobox.css" />
                         <Button fx:id="linkButton" contentDisplay="GRAPHIC_ONLY" minHeight="-Infinity" minWidth="-Infinity" mnemonicParsing="false" onAction="#linkButtonClick" style="-fx-background-image: url('/image/link.png');" stylesheets="@../style/app.css" text="Button">
                             <opaqueInsets>

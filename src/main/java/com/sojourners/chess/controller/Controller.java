@@ -362,6 +362,7 @@ public class Controller implements EngineCallBack, LinkerCallBack, ChessManualCa
             menuOfXiangqiMode.setSelected(true);
         }
 
+        refreshModeButton();
         newChessBoard(null);
         if (mode == ChessBoard.GameMode.JIEQI) {
             infoShowLabel.setText(board.statusText());
@@ -1047,6 +1048,15 @@ public class Controller implements EngineCallBack, LinkerCallBack, ChessManualCa
         useOpenBook.setValue(prop.getBookSwitch());
         // 初始化棋局
         newChessBoard(null);
+        // 启动检查：当前是象棋模式却挂着揭棋引擎，换回象棋引擎
+        if (prop.getGameMode() != ChessBoard.GameMode.JIEQI && JIEQI_ENGINE_NAME.equals(prop.getEngineName())) {
+            String xq = findXiangqiEngineName();
+            if (xq != null && !xq.isBlank()) {
+                JieqiTrace.log("启动检查：当前是象棋模式，引擎从揭棋引擎换回 " + xq);
+                prop.setEngineName(xq);
+                refreshEngineComboBox();
+            }
+        }
         // 加载引擎
         loadEngine(prop.getEngineName());
     }
@@ -1268,7 +1278,17 @@ public class Controller implements EngineCallBack, LinkerCallBack, ChessManualCa
                 engine != null && engine.getMultiPV() > 1, prop.isStepSound(), prop.isShowNumber(), fenCode);
         // 设置局面
         redGo = StringUtils.isEmpty(fenCode) ? true : fenCode.contains("w");
-        fenCode = board.fenCode(redGo);
+        boolean jieqiMode = prop.getGameMode() == ChessBoard.GameMode.JIEQI;
+        if (jieqiMode) {
+            // 揭棋：棋盘自造暗子布局，棋谱用标准初始局面
+            board.setGameMode(ChessBoard.GameMode.JIEQI);
+            char[][] standard = new char[10][9];
+            ChessBoard.initChessBoard(standard);
+            fenCode = ChessBoard.fenCode(standard, redGo);
+        } else {
+            fenCode = board.fenCode(redGo);
+        }
+        JieqiTrace.log("新建棋盘: 配置模式=" + prop.getGameMode() + " 棋盘模式=" + board.getGameMode() + " 红先=" + redGo + " 暗子数=" + board.hiddenCount());
         // 设置棋谱
         if (!fromManual)
             chessManualHandle.newChessManual(fenCode);
@@ -1276,11 +1296,19 @@ public class Controller implements EngineCallBack, LinkerCallBack, ChessManualCa
         refreshLineChart();
         // 重置引擎思考输出
         listView.getItems().clear();
-        // 清空思考状态信息
-        this.infoShowLabel.setText("");
+        // 重置揭棋的着法追踪状态
+        lastRecordedJieqiMove = null;
+        lastJieqiAnalyzedFen = null;
+        lastJieqiRetriedFen = null;
+        lastAutoClickedJieqi = null;
+        jieqiAutoClickTries = 0;
+        // 清空思考状态信息（揭棋模式显示盘面状态）
+        this.infoShowLabel.setText(jieqiMode ? board.statusText() : "");
 
         // 库招显示
-        doOpenBook();
+        if (!jieqiMode) {
+            doOpenBook();
+        }
 
         System.gc();
     }
@@ -1312,6 +1340,9 @@ public class Controller implements EngineCallBack, LinkerCallBack, ChessManualCa
     }
 
     private void refreshEngineComboBox() {
+        if (engineComboBox == null) {
+            return;
+        }
         engineComboBox.getItems().clear();
         for (EngineConfig ec : prop.getEngineConfigList()) {
             engineComboBox.getItems().add(ec.getName());

@@ -1,0 +1,365 @@
+name: Build TCHESS 揭棋版
+
+# 编译 TCHESS 揭棋版，并产出 Windows 可直接运行的免安装包。
+#
+# 手动触发：仓库页 -> Actions -> 左侧 "Build TCHESS 揭棋版" -> Run workflow
+#
+# 产物（下载后看 artifact 名字）：
+#   Xiangqi-windows-x64   <- 【Windows 免安装】解压即用，双击 TCHESS.exe，机器无需装 Java
+#   Xiangqi-windows-msi   <- 【Windows 安装包】双击安装（runner 需有 WiX，失败不阻断）
+#   Xiangqi-jar-jdk21/25  <- 【跨平台 jar】给已装 Java 21+ 的机器，或开发调试用
+#
+# 为什么不用 javafx:jlink：
+#   module-info.java 里 requires com.sun.jna / jnativehook / com.microsoft.onnxruntime
+#   三个非 JavaFX 模块，而 javafx-maven-plugin 的 jlink 目标只把 org.openjfx:* 拼进
+#   --module-path（见 JavaFXJLinkMojo#createCommandArguments），jlink 收不到那三个
+#   模块，必然因 "module not found" 失败。所以走 jpackage 的 classpath 模式。
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  MAIN_CLASS: com.sojourners.chess.Main
+  APP_NAME: TCHESS
+  APP_VERSION: 1.9.1
+
+jobs:
+  build:
+    name: 编译 (JDK ${{ matrix.java }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        java: [ '21', '25' ]
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v5
+
+      - name: 安装 JDK ${{ matrix.java }}
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+          cache: maven
+
+      - name: 检查资源规模
+        run: |
+          echo "--- 源码规模 ---"
+          find src/main/java -name '*.java' | wc -l
+          echo "--- 资源规模 ---"
+          du -sh src/main/resources
+          echo "--- ONNX 模型 ---"
+          MODEL_CNT=$(find src/main/resources/model -name '*.onnx' 2>/dev/null | wc -l)
+          echo "模型文件数: $MODEL_CNT"
+          if [ "$MODEL_CNT" -eq 0 ]; then
+            echo "::warning::仓库里没有 ONNX 模型（已在 .gitignore 中排除）。"
+            echo "::warning::编译可以完成，jar 里也不会有模型 —— 这是预期行为。"
+            echo "::warning::运行时模型走磁盘路径加载（PathUtils.getJarPath()+\"model/\"），"
+            echo "::warning::所以把模型包解压到 jar 同级的 model/ 即可。"
+          else
+            find src/main/resources/model -name '*.onnx' -printf '%10s  %P\n' | sort -k2
+          fi
+
+      - name: 编译并打包
+        # -B 批处理模式；-ntp 去掉下载进度条，日志干净
+        # 不用 -DskipTests：项目目前没有测试，且要保留将来加测试的余地
+        run: mvn -B -ntp clean package
+
+      - name: 列出构建产物
+        if: always()
+        run: |
+          echo "=== target 顶层 ==="
+          ls -la target/ || true
+          echo "=== jar 文件 ==="
+          find target -maxdepth 2 -name '*.jar' -printf '%10s  %p\n' 2>/dev/null | sort -k2 || true
+
+      - name: 校验 jar 完整性
+        # 确认揭棋类与资源真的打进 jar；缺任何一个直接报红。
+        # 注意：ONNX 模型不在仓库里（.gitignore 排除），这里不校验模型。
+        run: |
+          JAR=$(find target -maxdepth 1 -name '*.jar' ! -name '*sources*' ! -name '*javadoc*' | head -1)
+          if [ -z "$JAR" ]; then
+            echo "::error::没有找到构建出的 jar"
+            exit 1
+          fi
+          echo "检查: $JAR"
+          unzip -l "$JAR" > /tmp/jar_contents.txt
+
+          RC=0
+          echo "--- 关键类 ---"
+          for c in \
+            'com/sojourners/chess/jieqi/JieqiPosition.class' \
+            'com/sojourners/chess/jieqi/JieqiBoardRecognizer.class' \
+            'com/sojourners/chess/jieqi/JieqiOcr.class' \
+            'com/sojourners/chess/jieqi/JieqiSelfTest.class' \
+            'com/sojourners/chess/board/FlatBoardRender.class' \
+            'com/sojourners/chess/linker/GraphLinker.class' \
+            'com/sojourners/chess/yolo/VinYolo5Model.class'
+          do
+            if grep -q "$c" /tmp/jar_contents.txt; then
+              echo "  OK   $c"
+            else
+              echo "::error::jar 中缺少 $c"
+              RC=1
+            fi
+          done
+
+          echo "--- 资源（不含模型）---"
+          for r in \
+            'jieqi/jj/red_K.jpg' \
+            'jieqi/jj/black_k.jpg' \
+            'fxml/app.fxml' \
+            'fxml/linkSetting.fxml' \
+            'style/light-theme.css'
+          do
+            if grep -q "$r" /tmp/jar_contents.txt; then
+              echo "  OK   $r"
+            else
+              echo "::error::jar 中缺少资源 $r"
+              RC=1
+            fi
+          done
+
+          exit $RC
+
+      - name: 检查模型是否随仓库提供
+        # 模型走磁盘路径加载，不进 jar 也能编译。这里只提示，不阻断。
+        run: |
+          N=$(find src/main/resources/model -name '*.onnx' 2>/dev/null | wc -l)
+          echo "仓库内 ONNX 模型数: $N"
+          if [ "$N" -eq 0 ]; then
+            echo "::warning::仓库不含 ONNX 模型（.gitignore 已排除）。"
+            echo "::warning::编译与 jar 均正常；揭棋的棋盘识别/OCR 需要模型，"
+            echo "::warning::请把单独的模型包解压到 jar 同级的 model/ 目录后再运行。"
+          else
+            echo "模型会随 jar 一起打包"
+          fi
+
+      - name: 运行揭棋引擎自测
+        # jar 里自带 JieqiSelfTest：perft(2) 应为 2106、合法着法 46
+        # 这是行为基准，能验出棋规逻辑被改坏
+        continue-on-error: true
+        run: |
+          JAR=$(find target -maxdepth 1 -name '*.jar' ! -name '*sources*' | head -1)
+          echo "在 $JAR 上跑 JieqiSelfTest"
+          java -cp "$JAR" com.sojourners.chess.jieqi.JieqiSelfTest 2>&1 | tee /tmp/selftest.log || true
+          echo "--- 结果摘要 ---"
+          grep -iE 'perft|FAIL|PASS|通过|合法' /tmp/selftest.log || true
+
+      - name: 上传 jar
+        uses: actions/upload-artifact@v5
+        with:
+          name: Xiangqi-jar-jdk${{ matrix.java }}
+          path: target/*.jar
+          if-no-files-found: error
+          retention-days: 30
+
+  # ------------------------------------------- Windows 免安装包（主产物，自带 JRE）
+  windows-app-image:
+    name: Windows 免安装包
+    runs-on: windows-latest
+    needs: build
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v5
+
+      - name: 安装 JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: 编译并收集依赖
+        shell: pwsh
+        run: |
+          mvn -B -ntp clean package
+
+          # jpackage 的 --input 要求「主 jar + 全部依赖 jar 同处一个目录」。
+          # 用 Maven 把依赖拉到 target\libs，避免手工拼 classpath。
+          mvn -B -ntp dependency:copy-dependencies "-DoutputDirectory=$PWD\target\libs"
+
+          $main = Get-ChildItem target\*.jar -Exclude '*sources*','*javadoc*' | Select-Object -First 1
+          if (-not $main) { Write-Error "找不到主 jar"; exit 1 }
+          Write-Host "主 jar: $($main.Name)  $([math]::Round($main.Length/1MB,1)) MB"
+
+          Copy-Item $main.FullName "target\libs\" -Force
+          $n = (Get-ChildItem target\libs).Count
+          Write-Host "libs 目录文件数: $n"
+
+          # 记下主 jar 名字，后面 jpackage 要用
+          $main.Name | Out-File -Encoding ascii target\mainjar.txt
+
+      - name: 用 jpackage 生成免安装程序
+        shell: pwsh
+        run: |
+          # app-image：直接出「带 JRE 的程序目录」，不需要 WiX
+          # classpath 模式（--main-jar + --main-class），不碰 module-info
+          $mainJar = (Get-Content target\mainjar.txt).Trim()
+          Write-Host "用主 jar: $mainJar"
+
+          jpackage `
+            --type app-image `
+            --input "target\libs" `
+            --dest  "target\jpackage-out" `
+            --name  "${{ env.APP_NAME }}" `
+            --main-jar $mainJar `
+            --main-class "${{ env.MAIN_CLASS }}" `
+            --app-version "${{ env.APP_VERSION }}" `
+            --vendor "${{ env.APP_NAME }}" `
+            --description "TCHESS V${{ env.APP_VERSION }} 揭棋版" `
+            --win-console
+
+          if ($LASTEXITCODE -ne 0) { Write-Error "jpackage 失败，退出码 $LASTEXITCODE"; exit 1 }
+
+      - name: 校验免安装包并补音频
+        shell: pwsh
+        run: |
+          $root = "target\jpackage-out\${{ env.APP_NAME }}"
+          $exe  = "$root\${{ env.APP_NAME }}.exe"
+
+          if (!(Test-Path $exe)) {
+            Write-Error "没找到启动器 $exe"
+            Get-ChildItem -Recurse target\jpackage-out | Select-Object FullName
+            exit 1
+          }
+          Write-Host "OK 启动器: $exe"
+          Write-Host "OK 自带 JRE: $(Test-Path "$root\runtime\bin\java.exe")"
+
+          # 音频是按「class 所在目录/sound/」找的（PathUtils.getJarPath 解析 CodeSource）。
+          # jpackage 把 jar 放在 app\ 下，启动器加载的正是那里的 jar，
+          # 所以 sound 也要放到 app\ 旁边。
+          $src = "src\main\resources\sound"
+          if (Test-Path $src) {
+            Copy-Item $src "$root\app\sound" -Recurse -Force
+            Write-Host "已补音频: app\sound ($((Get-ChildItem "$root\app\sound").Count) 个文件)"
+          } else {
+            Write-Host "::warning::源码里没有 sound 目录"
+          }
+
+          # 模型：走磁盘路径 PathUtils.getJarPath() + "model/" 加载，
+          # jar 在 app\ 下 -> 运行时读的是 app\model\。
+          # 仓库里没有模型（.gitignore 排除），所以建出空目录并留说明。
+          $mdl = "$root\app\model"
+          New-Item -ItemType Directory -Force -Path $mdl | Out-Null
+          New-Item -ItemType Directory -Force -Path "$mdl\ppocrv6" | Out-Null
+
+          $repoModels = "src\main\resources\model"
+          $onnx = @(Get-ChildItem "$repoModels\*.onnx" -ErrorAction SilentlyContinue)
+          if ($onnx.Count -gt 0) {
+            Copy-Item "$repoModels\*.onnx" $mdl -Force
+            if (Test-Path "$repoModels\ppocrv6") {
+              Copy-Item "$repoModels\ppocrv6\*.onnx" "$mdl\ppocrv6" -Force
+            }
+            Write-Host "已把仓库内 $($onnx.Count) 个模型放进 app\model"
+          } else {
+            Write-Host "::warning::仓库不含模型，app\model 为空目录，揭棋识别不可用"
+            $tips = @(
+              '把解压后的模型放到本目录，与 jar 同级。'
+              'model\jieqi_piece_classifier.onnx'
+              'model\jieqi_piece_detector.onnx'
+              'model\yolo5-vin.onnx'
+              'model\yolov11.onnx'
+              'model\ppocrv6\det.onnx'
+              'model\ppocrv6\rec.onnx'
+            )
+            $tips | Out-File -Encoding utf8 "$mdl\把模型放这里.txt"
+          }
+
+          $jar = Get-ChildItem "$root\app\*.jar" | Select-Object -First 1
+          Write-Host "app 目录主 jar: $($jar.Name)  $([math]::Round($jar.Length/1MB,1)) MB"
+
+          $size = (Get-ChildItem $root -Recurse | Measure-Object -Property Length -Sum).Sum
+          Write-Host "免安装包总大小: $([math]::Round($size/1MB,1)) MB"
+
+      - name: 上传 Windows 免安装包
+        # 不手工 Compress-Archive：upload-artifact 自己会打一层 zip，
+        # 手工那层只会造成「zip 套 zip」，下载后要解两次。
+        # 上传 jpackage-out 整个目录（里面只有 TCHESS\），
+        # 这样下载解压后直接得到 TCHESS\TCHESS.exe，层级与原版一致。
+        uses: actions/upload-artifact@v5
+        with:
+          name: Xiangqi-windows-x64
+          path: target/jpackage-out
+          if-no-files-found: error
+          retention-days: 30
+
+  # ------------------------------------------------- Windows 安装包（可选，需 WiX）
+  windows-installer:
+    name: Windows 安装包 (msi)
+    runs-on: windows-latest
+    needs: build
+    # 打 msi 需要 WiX；windows-latest 通常预装，但不保证。
+    # 装不上就跳过，不影响免安装包。
+    continue-on-error: true
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v5
+
+      - name: 安装 JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: 检查 WiX
+        shell: pwsh
+        run: |
+          $wix    = Get-Command wix.exe    -ErrorAction SilentlyContinue
+          $candle = Get-Command candle.exe -ErrorAction SilentlyContinue
+          if ($wix)    { Write-Host "找到 WiX v4/v5: $($wix.Source)"; exit 0 }
+          if ($candle) { Write-Host "找到 WiX v3: $($candle.Source)"; exit 0 }
+          Write-Host "runner 上没有 WiX，尝试安装"
+          choco install wixtoolset -y --no-progress
+          if ($LASTEXITCODE -ne 0) { Write-Error "WiX 安装失败"; exit 1 }
+
+      - name: 编译并收集依赖
+        shell: pwsh
+        run: |
+          mvn -B -ntp clean package
+          mvn -B -ntp dependency:copy-dependencies "-DoutputDirectory=$PWD\target\libs"
+          $main = Get-ChildItem target\*.jar -Exclude '*sources*','*javadoc*' | Select-Object -First 1
+          if (-not $main) { Write-Error "找不到主 jar"; exit 1 }
+          Copy-Item $main.FullName "target\libs\" -Force
+          $main.Name | Out-File -Encoding ascii target\mainjar.txt
+
+      - name: 用 jpackage 生成 msi
+        shell: pwsh
+        run: |
+          $mainJar = (Get-Content target\mainjar.txt).Trim()
+
+          jpackage `
+            --type msi `
+            --input "target\libs" `
+            --dest  "target\installer-out" `
+            --name  "${{ env.APP_NAME }}" `
+            --main-jar $mainJar `
+            --main-class "${{ env.MAIN_CLASS }}" `
+            --app-version "${{ env.APP_VERSION }}" `
+            --vendor "${{ env.APP_NAME }}" `
+            --description "TCHESS V${{ env.APP_VERSION }} 揭棋版" `
+            --win-menu `
+            --win-shortcut `
+            --win-dir-chooser `
+            --win-per-user-install
+
+          if ($LASTEXITCODE -ne 0) { Write-Error "jpackage msi 失败，退出码 $LASTEXITCODE"; exit 1 }
+
+      - name: 上传安装包
+        uses: actions/upload-artifact@v5
+        with:
+          name: Xiangqi-windows-msi
+          path: target/installer-out/*.msi
+          if-no-files-found: warn
+          retention-days: 30

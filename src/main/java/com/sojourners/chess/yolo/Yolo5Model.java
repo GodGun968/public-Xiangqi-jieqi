@@ -5,6 +5,7 @@ import ai.onnxruntime.OnnxTensor;
 import ai.onnxruntime.OnnxValue;
 import ai.onnxruntime.OrtException;
 import ai.onnxruntime.OrtSession;
+import com.sojourners.chess.util.XiangqiUtils;
 
 import java.awt.*;
 import java.awt.image.BufferedImage;
@@ -12,6 +13,18 @@ import java.util.List;
 import java.util.*;
 
 public class Yolo5Model extends OnnxModel {
+
+    /**
+     * 棋子识别置信度（不同模型可以覆盖）。
+     * 揭棋盘面暗子多、对比度低，识别比普通象棋难，所以留了两档更低的阈值：
+     * 第一次没通过就用 RETRY 再试一遍，补全时用 RECOVERY。
+     */
+    protected float PIECE_CONFIDENCE = 0.4f;
+    protected float RETRY_PIECE_CONFIDENCE = 0.35f;
+    protected float RECOVERY_PIECE_CONFIDENCE = 0.3f;
+
+    /** 上一帧用过的棋盘框，下一帧优先复用它 */
+    private java.awt.Rectangle lastBoardPos;
 
     @Override
     public String getModelPath() {
@@ -32,7 +45,7 @@ public class Yolo5Model extends OnnxModel {
             // 图像宽高的缩放比例
             List<DetectResult> results = this.predict(img);
             // 寻找棋盘
-            java.awt.Rectangle pos = findBoardPosition(results);
+            java.awt.Rectangle pos = findBoardPosition(results, img);
             if (pos == null) {
                 return null;
             }
@@ -70,29 +83,213 @@ public class Yolo5Model extends OnnxModel {
         }
     }
 
-    private java.awt.Rectangle findBoardPosition(List<DetectResult> results) {
-        int boardCount = 0;
-        java.awt.Rectangle boardPos = new java.awt.Rectangle();
-        // 先找到棋盘
+    /**
+     * 棋盘框的置信度阈值，子类可覆盖
+     */
+    protected float getBoardConfidence() {
+        return CONFIDENCE;
+    }
+
+    /**
+     * 棋子置信度阈值，子类可覆盖
+     */
+    protected float getPieceConfidence() {
+        return CONFIDENCE;
+    }
+
+    /**
+     * 第一次识别没通过时的重试阈值，子类可覆盖
+     */
+    protected float getRetryPieceConfidence() {
+        return RETRY_PIECE_CONFIDENCE;
+    }
+
+    /**
+     * 补全漏识别棋子时的阈值，子类可覆盖
+     */
+    protected float getRecoveryPieceConfidence() {
+        return RECOVERY_PIECE_CONFIDENCE;
+    }
+
+    /**
+     * 找棋盘框：先信模型直接输出的棋盘框，再试按棋子分布拟合出来的框，
+     * 每个候选都要能填出一张合法盘面才作数。
+     */
+    private java.awt.Rectangle findBoardPosition(List<DetectResult> results, BufferedImage img) {
+        List<java.awt.Rectangle> modelRects = findBoardsByModel(results);
+        for (java.awt.Rectangle r : modelRects) {
+            char[][] tmp = new char[10][9];
+            setBlankBoard(tmp);
+            fillBoard(results, r, tmp);
+            if (XiangqiUtils.validateChessBoard(tmp)) {
+                return r;
+            }
+        }
+
+        List<java.awt.Rectangle> pieces = findBoardPositionByPieces(results, img);
+        if (pieces != null) {
+            for (java.awt.Rectangle r : pieces) {
+                char[][] tmp = new char[10][9];
+                setBlankBoard(tmp);
+                fillBoard(results, r, tmp);
+                if (XiangqiUtils.validateChessBoard(tmp)) {
+                    return r;
+                }
+            }
+            if (!pieces.isEmpty()) {
+                return pieces.get(0);
+            }
+        }
+
+        return modelRects.isEmpty() ? null : modelRects.get(0);
+    }
+
+    /**
+     * 取出模型直接给出的棋盘框（label '0'），按面积从大到小排
+     */
+    private List<java.awt.Rectangle> findBoardsByModel(List<DetectResult> results) {
+        List<java.awt.Rectangle> list = new ArrayList<>();
         for (DetectResult obj : results) {
             char label = obj.label;
             Rectangle bound = obj.rect;
             if (label == '0') {
-                // 取最大的棋盘区域
-                int w = (int) (bound.getWidth()), h = (int) (bound.getHeight());
-                if (w > boardPos.width && h > boardPos.height) {
-                    boardPos.x = (int) (bound.getX() - w / 2d);
-                    boardPos.y = (int) (bound.getY() - h / 2d);
-                    boardPos.width = w;
-                    boardPos.height = h;
-                }
-                boardCount++;
+                int w = (int) bound.getWidth(), h = (int) bound.getHeight();
+                list.add(new java.awt.Rectangle((int) (bound.getX() - w / 2d), (int) (bound.getY() - h / 2d), w, h));
             }
         }
-        if (boardCount == 0) {
+        list.sort((a, b) -> Long.compare((long) b.width * b.height, (long) a.width * a.height));
+        return list;
+    }
+
+    /**
+     * 按棋子的行列分布反推棋盘框：
+     * 把棋子的 x / y 聚类成格线，再枚举棋盘左上角可能的偏移，列出候选框。
+     */
+    private List<java.awt.Rectangle> findBoardPositionByPieces(List<DetectResult> results, BufferedImage img) {
+        if (results == null || results.size() < 8) {
             return null;
         }
-        return boardPos;
+        float tol = Math.max(6f, 0.015f * Math.max(img.getWidth(), img.getHeight()));
+
+        List<Float> xs = new ArrayList<>();
+        List<Float> ys = new ArrayList<>();
+        List<Float> ws = new ArrayList<>();
+        List<Float> hs = new ArrayList<>();
+        for (DetectResult obj : results) {
+            if (obj.label != '0') {
+                xs.add(obj.rect.x);
+                ys.add(obj.rect.y);
+                ws.add(obj.rect.width);
+                hs.add(obj.rect.height);
+            }
+        }
+        if (xs.size() < 8) {
+            return null;
+        }
+
+        GridFit fx = gridFit(xs, tol, median(ws), 8);
+        GridFit fy = gridFit(ys, tol, median(hs), 9);
+        if (fx == null || fy == null) {
+            return null;
+        }
+
+        List<java.awt.Rectangle> rects = new ArrayList<>();
+        int maxOx = 8 - fx.lastIndex;
+        int maxOy = 9 - fy.lastIndex;
+        for (int oy = 0; oy <= maxOy; oy++) {
+            for (int ox = 0; ox <= maxOx; ox++) {
+                int x = (int) (fx.base - (ox + 0.5f) * fx.unit);
+                int y = (int) (fy.base - (oy + 0.5f) * fy.unit);
+                int w = (int) (fx.unit * 9f);
+                int h = (int) (fy.unit * 10f);
+                if (w >= 50 && h >= 50 && w <= img.getWidth() * 2 && h <= img.getHeight() * 2) {
+                    rects.add(new java.awt.Rectangle(x, y, w, h));
+                }
+            }
+        }
+        return rects;
+    }
+
+    /**
+     * 把一串坐标拟合成"等差数列"（棋盘格线）：
+     * 先按容差聚类、再枚举格距，取残差最小的那个作为 unit。
+     *
+     * @param maxIndex 该方向最多有几格（横向 8、纵向 9）
+     */
+    private GridFit gridFit(List<Float> vals, float tol, float pieceSize, int maxIndex) {
+        Collections.sort(vals);
+
+        // 相邻很近的坐标合并成一个簇
+        List<Float> clusters = new ArrayList<>();
+        for (float v : vals) {
+            if (!clusters.isEmpty() && v - clusters.get(clusters.size() - 1) <= tol) {
+                clusters.set(clusters.size() - 1, (clusters.get(clusters.size() - 1) + v) / 2f);
+            } else {
+                clusters.add(v);
+            }
+        }
+        if (clusters.size() < 3) {
+            return null;
+        }
+
+        // 枚举两个簇的差能被几格整除，找残差最小的格距
+        float bestUnit = 0f;
+        double bestScore = Double.MAX_VALUE;
+        int n = clusters.size();
+        for (int i = 0; i < n; i++) {
+            for (int j = i + 1; j < n; j++) {
+                float d = clusters.get(j) - clusters.get(i);
+                for (int k = 1; k <= 9; k++) {
+                    float u = d / k;
+                    if (u < 5f || u > 200f) {
+                        continue;
+                    }
+                    double score = 0d;
+                    for (int p = 1; p < n; p++) {
+                        float diff = clusters.get(p) - clusters.get(p - 1);
+                        int kk = Math.max(1, Math.round(diff / u));
+                        score += Math.abs(diff - kk * u);
+                    }
+                    // 偏好接近棋子尺寸的格距
+                    score += Math.abs(u - pieceSize);
+                    if (score < bestScore) {
+                        bestScore = score;
+                        bestUnit = u;
+                    }
+                }
+            }
+        }
+        if (bestUnit <= 0f) {
+            return null;
+        }
+
+        // 把每个簇映射到格号，算出基准偏移
+        float unit = bestUnit;
+        int[] idx = new int[clusters.size()];
+        idx[0] = 0;
+        for (int i = 1; i < clusters.size(); i++) {
+            float d = clusters.get(i) - clusters.get(i - 1);
+            idx[i] = idx[i - 1] + Math.max(1, Math.round(d / unit));
+        }
+        if (idx[clusters.size() - 1] > maxIndex) {
+            return null;
+        }
+
+        float base = 0f;
+        for (int i = 0; i < clusters.size(); i++) {
+            base += clusters.get(i) - idx[i] * unit;
+        }
+        base /= clusters.size();
+        return new GridFit(unit, base, idx[idx.length - 1]);
+    }
+
+    private float median(List<Float> vals) {
+        if (vals == null || vals.isEmpty()) {
+            return 60f;
+        }
+        Collections.sort(vals);
+        int mid = vals.size() / 2;
+        return vals.size() % 2 == 1 ? vals.get(mid) : (vals.get(mid - 1) + vals.get(mid)) / 2f;
     }
 
     /**
@@ -106,28 +303,13 @@ public class Yolo5Model extends OnnxModel {
             if (img == null) {
                 return false;
             }
-            // 图像宽高的缩放比例
             List<DetectResult> results = this.predict(img);
-            setBlankBoard(board);
-            java.awt.Rectangle boardPos = findBoardPosition(results);
-            if (boardPos == null) {
-                return false;
+            if (fillChessBoard(results, img, board)) {
+                return true;
             }
-            int pieceWidth = boardPos.width / 8, pieceHeight = boardPos.height / 9;
-            // 再获取每个棋子及其位置
-            for (DetectResult obj : results) {
-                char label = obj.label;
-                Rectangle bound = obj.rect;
-                if (label != '0') {
-                    int j = (int) ((bound.x - (boardPos.x - pieceWidth / 2)) / pieceWidth);
-                    int i = (int) ((bound.y - (boardPos.y - pieceHeight / 2)) / pieceHeight);
-                    if (i < 0 || i > 9 || j < 0 || j > 8) {
-                        continue;
-                    }
-                    board[i][j] = label;
-                }
-            }
-            return true;
+            // 第一次没过就用更低阈值再试一次（揭棋盘面对比度低，常见）
+            List<DetectResult> results2 = this.predict(img, this.getBoardConfidence(), this.getRetryPieceConfidence());
+            return fillChessBoard(results2, img, board);
 
         } catch (Exception e) {
             e.printStackTrace();
@@ -135,7 +317,135 @@ public class Yolo5Model extends OnnxModel {
         }
     }
 
+    /**
+     * 依次尝试上一帧棋盘框、模型棋盘框、按棋子拟合的框，填出第一个合法盘面
+     */
+    private boolean fillChessBoard(List<DetectResult> results, BufferedImage img, char[][] board) {
+        // 优先复用上一帧的棋盘框（位置通常没变）
+        if (lastBoardPos != null
+                && lastBoardPos.x >= 0 && lastBoardPos.y >= 0
+                && lastBoardPos.x + lastBoardPos.width <= img.getWidth()
+                && lastBoardPos.y + lastBoardPos.height <= img.getHeight()) {
+            setBlankBoard(board);
+            fillBoard(results, lastBoardPos, board);
+            if (XiangqiUtils.validateChessBoard(board)) {
+                return true;
+            }
+        }
+
+        for (java.awt.Rectangle modelPos : findBoardsByModel(results)) {
+            setBlankBoard(board);
+            fillBoard(results, modelPos, board);
+            if (XiangqiUtils.validateChessBoard(board)) {
+                lastBoardPos = modelPos;
+                return true;
+            }
+        }
+
+        List<java.awt.Rectangle> piecePos = findBoardPositionByPieces(results, img);
+        if (piecePos != null) {
+            for (java.awt.Rectangle r : piecePos) {
+                setBlankBoard(board);
+                fillBoard(results, r, board);
+                if (XiangqiUtils.validateChessBoard(board)) {
+                    lastBoardPos = r;
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * 在已识别的盘面上补全漏掉的格子：
+     * 用更低的置信度再跑一遍，只往空格里填，填完要更多子、而且是合法盘面才采纳。
+     */
+    @Override
+    public boolean completeChessBoard(BufferedImage img, char[][] board) {
+        try {
+            if (img == null || board == null) {
+                return false;
+            }
+            java.awt.Rectangle pos = lastBoardPos;
+            if (pos == null) {
+                return false;
+            }
+
+            List<DetectResult> results = this.predict(img, this.getBoardConfidence(), this.getRecoveryPieceConfidence());
+            char[][] merged = new char[10][9];
+            for (int i = 0; i < 10; i++) {
+                System.arraycopy(board[i], 0, merged[i], 0, 9);
+            }
+
+            fillBoard(results, pos, merged, true);
+            if (this.countPieces(merged) > this.countPieces(board) && XiangqiUtils.validateChessBoard(merged)) {
+                for (int i = 0; i < 10; i++) {
+                    System.arraycopy(merged[i], 0, board[i], 0, 9);
+                }
+                return true;
+            }
+            return false;
+
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    private int countPieces(char[][] board) {
+        int n = 0;
+        for (int i = 0; i < 10; i++) {
+            for (int j = 0; j < 9; j++) {
+                if (board[i][j] != ' ') {
+                    n++;
+                }
+            }
+        }
+        return n;
+    }
+
+    private void fillBoard(List<DetectResult> results, java.awt.Rectangle boardPos, char[][] board) {
+        this.fillBoard(results, boardPos, board, false);
+    }
+
+    /**
+     * 把检测框填进盘面
+     *
+     * @param onlyEmpty 只填空格（补全模式），否则覆盖
+     */
+    private void fillBoard(List<DetectResult> results, java.awt.Rectangle boardPos, char[][] board, boolean onlyEmpty) {
+        int pieceWidth = boardPos.width / 8, pieceHeight = boardPos.height / 9;
+        java.awt.Rectangle inner = new java.awt.Rectangle(
+                boardPos.x - pieceWidth / 2, boardPos.y - pieceHeight / 2,
+                boardPos.width + pieceWidth, boardPos.height + pieceHeight);
+
+        for (DetectResult obj : results) {
+            char label = obj.label;
+            Rectangle bound = obj.rect;
+            if (label == '0') {
+                continue;
+            }
+            if (bound.x < inner.x || bound.x > inner.x + inner.width
+                    || bound.y < inner.y || bound.y > inner.y + inner.height) {
+                continue;
+            }
+            int j = (int) ((bound.x - (boardPos.x - pieceWidth / 2)) / (float) pieceWidth);
+            int i = (int) ((bound.y - (boardPos.y - pieceHeight / 2)) / (float) pieceHeight);
+            if (i >= 0 && i <= 9 && j >= 0 && j <= 8 && (!onlyEmpty || board[i][j] == ' ')) {
+                board[i][j] = label;
+            }
+        }
+    }
+
     private List<DetectResult> predict(BufferedImage image) throws OrtException {
+        return this.predict(image, this.getBoardConfidence(), this.getPieceConfidence());
+    }
+
+    /**
+     * 推理，boardConf / pieceConf 分开控制棋盘和棋子的阈值
+     */
+    private List<DetectResult> predict(BufferedImage image, float boardConf, float pieceConf) throws OrtException {
 
         List<DetectResult> list = null;
 
@@ -154,13 +464,33 @@ public class Yolo5Model extends OnnxModel {
                     OnnxTensor resultTensor = (OnnxTensor) resultValue;
                     float[] output = resultTensor.getFloatBuffer().array();
 
-                    list = processOutput(output, image, rate);
+                    list = processOutput(output, image, rate, boardConf, pieceConf);
                 }
             }
         }
 
 //        System.gc();
         System.out.println(System.currentTimeMillis() - s);
+        return list;
+    }
+
+    /**
+     * 只检测棋子框（不填盘面），给揭棋的网格拟合用
+     */
+    public List<java.awt.Rectangle> detectPieceBoxes(BufferedImage image) {
+        List<java.awt.Rectangle> list = new ArrayList<>();
+        if (image == null) {
+            return list;
+        }
+        try {
+            for (DetectResult r : this.predict(image, this.getBoardConfidence(), this.getRetryPieceConfidence())) {
+                if (r.label != '0' && r.rect != null) {
+                    list.add(new java.awt.Rectangle((int) r.rect.getX(), (int) r.rect.getY(),
+                            (int) r.rect.getWidth(), (int) r.rect.getHeight()));
+                }
+            }
+        } catch (Throwable ignored) {
+        }
         return list;
     }
 
@@ -261,7 +591,20 @@ public class Yolo5Model extends OnnxModel {
         return right - left;
     }
 
+    /**
+     * 用默认阈值解析输出，子类可覆盖
+     */
     List<DetectResult> processOutput(float[] output, BufferedImage img, float rate) {
+        return this.processOutput(output, img, rate, this.getBoardConfidence(), this.getPieceConfidence());
+    }
+
+    /**
+     * 解析 YOLO 输出张量：每 stride 个值是一组 (x, y, w, h, obj, cls...)
+     *
+     * @param boardConf 棋盘框阈值（label '0'）
+     * @param pieceConf 棋子阈值
+     */
+    List<DetectResult> processOutput(float[] output, BufferedImage img, float rate, float boardConf, float pieceConf) {
         List<DetectResult> list = new ArrayList<>();
 
         int sizeClasses = labels.length;
@@ -281,7 +624,8 @@ public class Yolo5Model extends OnnxModel {
             }
 
             float score = maxClass * output[indexBase + 4];
-            if (score > CONFIDENCE) {
+            float threshold = labels[maxIndex] == '0' ? boardConf : pieceConf;
+            if (score > threshold) {
                 float xPos = output[indexBase];
                 float yPos = output[indexBase + 1];
                 float w = output[indexBase + 2];
@@ -382,6 +726,21 @@ public class Yolo5Model extends OnnxModel {
                     ", width=" + width +
                     ", height=" + height +
                     '}';
+        }
+    }
+
+    /**
+     * 网格拟合结果：格距、基准偏移、最后一个格号
+     */
+    private static class GridFit {
+        float unit;
+        float base;
+        int lastIndex;
+
+        GridFit(float unit, float base, int lastIndex) {
+            this.unit = unit;
+            this.base = base;
+            this.lastIndex = lastIndex;
         }
     }
 

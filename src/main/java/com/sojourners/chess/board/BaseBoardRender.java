@@ -330,6 +330,24 @@ public abstract class BaseBoardRender implements BoardRender {
     }
 
     /**
+     * 绘制揭棋暗子（未翻开的棋子）：双层圆片，不显示字。
+     * 子类可覆盖成自己的配色。
+     */
+    protected void drawHiddenPiece(double cx, double cy, double r, boolean isRed) {
+        gc.setFill(Color.web("#7B5B3A"));
+        gc.fillOval(cx - r, cy - r, 2 * r, 2 * r);
+
+        double inner = r * 0.87;
+        gc.setFill(Color.web("#F4EDDC"));
+        gc.fillOval(cx - inner, cy - inner, 2 * inner, 2 * inner);
+
+        gc.setStroke(Color.web("#DCD2BA"));
+        gc.setLineWidth(Math.max(1, r / 20d));
+        double ring = r * 0.72;
+        gc.strokeOval(cx - ring, cy - ring, 2 * ring, 2 * ring);
+    }
+
+    /**
      * 棋子大小
      * @return
      */

@@ -10,6 +10,16 @@ public class Yolo11Model extends Yolo5Model {
     float CONFIDENCE = 0.5f;
 
     @Override
+    protected float getBoardConfidence() {
+        return CONFIDENCE;
+    }
+
+    @Override
+    protected float getPieceConfidence() {
+        return PIECE_CONFIDENCE;
+    }
+
+    @Override
     public String getModelPath() {
         return "model/yolov11.onnx";
     }
@@ -52,7 +62,19 @@ public class Yolo11Model extends Yolo5Model {
         return arr;
     }
 
+    @Override
     List<DetectResult> processOutput(float[] output, BufferedImage img, float rate) {
+        return this.processOutput(output, img, rate, this.getBoardConfidence(), this.getPieceConfidence());
+    }
+
+    /**
+     * 解析 YOLOv11 输出张量：每 stride 个值是一组 (x, y, w, h, cls...)，类别分即置信度
+     *
+     * @param boardConf 棋盘框阈值（label '0'）
+     * @param pieceConf 棋子阈值
+     */
+    @Override
+    List<DetectResult> processOutput(float[] output, BufferedImage img, float rate, float boardConf, float pieceConf) {
         List<DetectResult> list = new ArrayList<>();
 
         float xPadding = (SIZE - img.getWidth() * rate) / 2;
@@ -74,14 +96,14 @@ public class Yolo11Model extends Yolo5Model {
                 }
             }
 
-            float score = maxClass;
-            if (score > CONFIDENCE) {
+            float threshold = labels[maxIndex] == '0' ? boardConf : pieceConf;
+            if (maxClass > threshold) {
                 float xPos = output[reshape(indexBase, stride, size)];
                 float yPos = output[reshape(indexBase + 1, stride, size)];
                 float w = output[reshape(indexBase + 2, stride, size)];
                 float h = output[reshape(indexBase + 3, stride, size)];
                 Rectangle rect = new Rectangle((xPos - xPadding) / rate, (yPos - yPadding) / rate, w / rate, h / rate);
-                list.add(new DetectResult(labels[maxIndex], rect, score));
+                list.add(new DetectResult(labels[maxIndex], rect, maxClass));
             }
         }
 

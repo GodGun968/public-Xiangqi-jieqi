@@ -43,4 +43,12 @@ public abstract class OnnxModel {
 
     public abstract boolean findChessBoard(BufferedImage img, char[][] board);
 
+    /**
+     * 在已识别的盘面上"补全"漏识别的棋子。默认不支持，返回 false。
+     * 揭棋只靠棋盘线难以判断哪些格子有子，所以 Yolo5Model 用检测框来补齐。
+     */
+    public boolean completeChessBoard(BufferedImage img, char[][] board) {
+        return false;
+    }
+
 }

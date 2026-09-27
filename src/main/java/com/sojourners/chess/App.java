@@ -25,8 +25,10 @@ import java.net.URL;
  */
 public class App extends Application {
 
-    public static final String VERSION = "1.9";
-    public static final String BUILT_ON = "20260801";
+    public static final String VERSION = "1.9.1";
+    public static final String EDITION = "揭棋版";
+    public static final String BUILT_ON = "20260911";
+    public static final String TITLE = "TCHESS  V1.9.1 揭棋版";
 
     private static Stage engineAdd;
     private static Stage engineSetting;
@@ -45,7 +47,7 @@ public class App extends Application {
         FXMLLoader fxmlLoader = new FXMLLoader();
         fxmlLoader.setLocation(getClass().getResource("/fxml/app.fxml"));
         Parent root = fxmlLoader.load();
-        primaryStage.setTitle("TCHESS  V" + VERSION);
+        primaryStage.setTitle(TITLE);
         Scene scene = new Scene(root);
         applyTheme(scene);
         primaryStage.setScene(scene);

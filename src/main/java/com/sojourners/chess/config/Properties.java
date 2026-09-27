@@ -26,6 +26,21 @@ public class Properties implements Serializable {
     private ChessBoard.BoardSize boardSize;
     private ChessBoard.BoardStyle boardStyle = ChessBoard.BoardStyle.DEFAULT;
 
+    /*
+     * 对局模式：象棋 / 揭棋
+     */
+    private ChessBoard.GameMode gameMode = ChessBoard.GameMode.XIANGQI;
+
+    /*
+     * 揭棋网格标定（后台连线识别棋盘用）。-1 表示未标定。
+     */
+    private double jieqiGridX0 = -1.0;
+    private double jieqiGridY0 = -1.0;
+    private double jieqiGridDx = -1.0;
+    private double jieqiGridDy = -1.0;
+    private int jieqiGridWidth;
+    private int jieqiGridHeight;
+
     private boolean stepTip;
 
     private boolean stepSound;
@@ -210,6 +225,62 @@ public class Properties implements Serializable {
 
     public void setBoardStyle(ChessBoard.BoardStyle boardStyle) {
         this.boardStyle = boardStyle;
+    }
+
+    public ChessBoard.GameMode getGameMode() {
+        return gameMode == null ? ChessBoard.GameMode.XIANGQI : gameMode;
+    }
+
+    public void setGameMode(ChessBoard.GameMode gameMode) {
+        this.gameMode = gameMode == null ? ChessBoard.GameMode.XIANGQI : gameMode;
+    }
+
+    public double getJieqiGridX0() {
+        return jieqiGridX0;
+    }
+
+    public void setJieqiGridX0(double v) {
+        jieqiGridX0 = v;
+    }
+
+    public double getJieqiGridY0() {
+        return jieqiGridY0;
+    }
+
+    public void setJieqiGridY0(double v) {
+        jieqiGridY0 = v;
+    }
+
+    public double getJieqiGridDx() {
+        return jieqiGridDx;
+    }
+
+    public void setJieqiGridDx(double v) {
+        jieqiGridDx = v;
+    }
+
+    public double getJieqiGridDy() {
+        return jieqiGridDy;
+    }
+
+    public void setJieqiGridDy(double v) {
+        jieqiGridDy = v;
+    }
+
+    public int getJieqiGridWidth() {
+        return jieqiGridWidth;
+    }
+
+    public void setJieqiGridWidth(int v) {
+        jieqiGridWidth = v;
+    }
+
+    public int getJieqiGridHeight() {
+        return jieqiGridHeight;
+    }
+
+    public void setJieqiGridHeight(int v) {
+        jieqiGridHeight = v;
     }
 
     public int getEngineDelayStart() {

@@ -1,6 +1,8 @@
 package com.sojourners.chess.board;
 
 import com.sojourners.chess.config.Properties;
+import com.sojourners.chess.jieqi.JieqiPosition;
+import com.sojourners.chess.jieqi.JieqiTrace;
 import com.sojourners.chess.media.SoundPlayer;
 import com.sojourners.chess.util.PathUtils;
 import com.sojourners.chess.util.StringUtils;
@@ -53,6 +55,34 @@ public class ChessBoard {
     private List<MoveTip> moveTips = new ArrayList<>();
 
     private boolean isReverse;
+
+    /** 对局模式：象棋 / 揭棋 */
+    private GameMode gameMode = GameMode.XIANGQI;
+
+    /** 揭棋局面（象棋模式下为 null） */
+    private JieqiPosition jieqi;
+
+    /** 揭棋消息（状态栏显示） */
+    private String jieqiMessage = "";
+
+    /** 已经走出、等待对方棋盘出现的一手（ICCS），null 表示没有待确认的手 */
+    private String pendingJieqiMove;
+    /** 上一步走的子（用于回放确认） */
+    private char pendingJieqiPiece;
+    private long pendingJieqiAt;
+    private long pendingJieqiClickAt;
+    private int pendingJieqiTry;
+    /** 这一手超过 5 秒没在对方棋盘上出现，判定为没走成、需要重新分析 */
+    private boolean pendingJieqiRollback;
+    /** 对方截图里的局面仍是走之前的样子 */
+    private boolean pendingJieqiStillBefore;
+    /** 对方截图的时间（帧时间），用于确认点击后是否有新帧 */
+    private long pendingJieqiFrameAt;
+
+    /** 从对方截图识别出的最近一手（ICCS） */
+    private String lastJieqiMove;
+    /** 最近一手的文字描述 */
+    private String lastJieqiMoveText;
 
     public static class Point {
         int x;
@@ -138,13 +168,25 @@ public class ChessBoard {
     }
     public enum BoardStyle {
         DEFAULT,
-        CUSTOM;
+        CUSTOM,
+        MODERN,
+        WOOD,
+        DARK,
+        JADE;
+    }
+
+    /** 对局模式 */
+    public enum GameMode {
+        /** 象棋 */
+        XIANGQI,
+        /** 揭棋 */
+        JIEQI
     }
 
     public ChessBoard(Canvas canvas, BoardSize bs, BoardStyle style, boolean stepTip, boolean manualTip,
                       boolean showMultiPV, boolean stepSound, boolean showNumber, String fenCode) {
         if (this.boardRender == null) {
-            this.boardRender = style == BoardStyle.CUSTOM ? new CustomBoardRender(canvas) : new DefaultBoardRender(canvas);
+            this.boardRender = createRender(style, canvas);
         }
 
         this.stepTip = stepTip;
@@ -213,11 +255,874 @@ public class ChessBoard {
     }
 
     public void setBoardStyle(BoardStyle style, Canvas canvas) {
-        this.boardRender = style == BoardStyle.CUSTOM ? new CustomBoardRender(canvas) : new DefaultBoardRender(canvas);
+        boardRender = createRender(style, canvas);
         this.paint();
     }
 
+    /**
+     * 按棋盘样式创建渲染器，四种新风格都是扁平渲染器换配色
+     */
+    private static BaseBoardRender createRender(BoardStyle style, Canvas canvas) {
+        switch (style) {
+            case CUSTOM: {
+                return new CustomBoardRender(canvas);
+            }
+            case MODERN: {
+                return new FlatBoardRender(canvas, FlatBoardRender.MODERN);
+            }
+            case WOOD: {
+                return new FlatBoardRender(canvas, FlatBoardRender.WOOD);
+            }
+            case DARK: {
+                return new FlatBoardRender(canvas, FlatBoardRender.DARK);
+            }
+            case JADE: {
+                return new FlatBoardRender(canvas, FlatBoardRender.JADE);
+            }
+            default: {
+                return new DefaultBoardRender(canvas);
+            }
+        }
+    }
+
+    public GameMode getGameMode() {
+        return gameMode;
+    }
+
+    /**
+     * 切换对局模式。切到揭棋会新开一局；切回象棋恢复初始局面。
+     */
+    public void setGameMode(GameMode mode) {
+        gameMode = mode == null ? GameMode.XIANGQI : mode;
+        JieqiTrace.log("模式切换 -> " + gameMode);
+
+        remark = null;
+        prevStep = null;
+        if (gameMode == GameMode.JIEQI) {
+            newJieqiGame(System.nanoTime());
+        } else {
+            jieqi = null;
+            jieqiMessage = "";
+            initChessBoard(board);
+            paint();
+        }
+    }
+
+    /**
+     * 新开一局揭棋（seed 用于复现）
+     */
+    public void newJieqiGame(long seed) {
+        jieqi = new JieqiPosition(seed);
+        jieqiMessage = "";
+        remark = null;
+        prevStep = null;
+        syncJieqiBoard();
+        paint();
+        JieqiTrace.log("揭棋新局 seed=" + seed + " 暗子数=" + hiddenCount() + JieqiTrace.dump(board));
+    }
+
+    /**
+     * 盘面上还有多少个暗子
+     */
+    public int hiddenCount() {
+        int n = 0;
+        for (char[] row : board) {
+            for (char ch : row) {
+                if (JieqiPosition.isHiddenPiece(ch)) {
+                    n++;
+                }
+            }
+        }
+        return n;
+    }
+
+    public JieqiPosition getJieqiPosition() {
+        return jieqi;
+    }
+
+    public void applyJieqiGrid(char[][] grid) {
+        applyJieqiGrid(grid, '\0', 0L);
+    }
+
+    public void applyJieqiGrid(char[][] grid, char ourSide) {
+        applyJieqiGrid(grid, ourSide, 0L);
+    }
+
+    /**
+     * 用连线截到的棋盘校准揭棋局面：
+     * 先吸收"我们已走、对方棋盘还没显示"的那一手，再按盘面差分推断对方走了什么，
+     * 更新行棋方，最后重算棋子池。
+     *
+     * @param ourSide   我们的颜色（w/b），用连线时才知道；0 表示未知
+     * @param capturedAt 这张截图的采集时间，用于确认点击有没有生效
+     */
+    public void applyJieqiGrid(char[][] grid, char ourSide, long capturedAt) {
+        if (jieqi == null) {
+            jieqi = new JieqiPosition(System.nanoTime());
+        }
+
+        char[][] frame = new char[10][9];
+        for (int r = 0; r < 10; r++) {
+            System.arraycopy(grid[r], 0, frame[r], 0, 9);
+        }
+
+        pendingJieqiRollback = false;
+        absorbPendingInto(frame, ourSide, capturedAt);
+
+        char[][] before = new char[10][9];
+        for (int r = 0; r < 10; r++) {
+            System.arraycopy(jieqi.grid[r], 0, before[r], 0, 9);
+        }
+
+        char mover = detectMover(jieqi.grid, frame, ourSide);
+        lastJieqiMove = detectMove(before, frame, mover);
+        lastJieqiMoveText = lastJieqiMove == null ? null : describeOnBoard(before, lastJieqiMove);
+        if (mover != 0) {
+            // 对方的这一手走完后，轮到另一方
+            char nowSide = (char) (mover == 'w' ? 'b' : 'w');
+            if (nowSide != jieqi.side) {
+                JieqiTrace.log("揭棋连线：行棋方改为 " + (nowSide == 'w' ? "红方" : "黑方")
+                        + "（上一手是" + (mover == 'w' ? "红方" : "黑方") + "走的）");
+            }
+            jieqi.side = nowSide;
+        }
+
+        if (pendingJieqiRollback && ourSide != 0) {
+            if (jieqi.side != ourSide) {
+                JieqiTrace.log("揭棋连线：上一手我们点的没落到对方棋盘上，行棋方仍算 "
+                        + (ourSide == 'w' ? "红方" : "黑方") + "（我们），重新分析");
+            }
+            jieqi.side = ourSide;
+        }
+
+        for (int r = 0; r < 10; r++) {
+            for (int c = 0; c < 9; c++) {
+                char ch = frame[r][c];
+                jieqi.grid[r][c] = ch != ' ' && ch != '.' ? ch : '.';
+            }
+        }
+
+        // 重算棋子池：满池减去盘面上已经翻明的子
+        jieqi.poolRed = JieqiPosition.newPool();
+        jieqi.poolBlack = JieqiPosition.newPool();
+        for (int r = 0; r < 10; r++) {
+            for (int c = 0; c < 9; c++) {
+                char ch = jieqi.grid[r][c];
+                if (ch != '.' && !JieqiPosition.isHiddenPiece(ch)) {
+                    char up = Character.toUpperCase(ch);
+                    Map<Character, Integer> pool = Character.isLowerCase(ch) ? jieqi.poolBlack : jieqi.poolRed;
+                    if (pool.containsKey(up)) {
+                        pool.put(up, Math.max(0, pool.get(up) - 1));
+                    }
+                }
+            }
+        }
+
+        remark = null;
+        syncJieqiBoard();
+        paint();
+    }
+
+    public String getPendingJieqiMove() {
+        return pendingJieqiMove;
+    }
+
+    /**
+     * 是否没有待确认的走子（pendingJieqiMove 为空）
+     */
+    public boolean isPendingJieqiShown() {
+        return pendingJieqiMove == null;
+    }
+
+    /**
+     * 点下去超过 1.5 秒、对方棋盘还是走之前的样子（且已确认读过新帧）时，
+     * 说明点击可能没生效，需要重新点一次（最多 3 次）
+     */
+    public boolean shouldReClickJieqi() {
+        return pendingJieqiMove != null
+                && pendingJieqiTry < 3
+                && System.currentTimeMillis() - pendingJieqiClickAt > 1500L
+                && pendingJieqiStillBefore
+                && pendingJieqiFrameAt >= pendingJieqiClickAt + 700L;
+    }
+
+    public int getPendingJieqiTry() {
+        return pendingJieqiTry;
+    }
+
+    public void markJieqiReClicked() {
+        pendingJieqiTry++;
+        pendingJieqiClickAt = System.currentTimeMillis();
+    }
+
+    public void clearPendingJieqiMove() {
+        pendingJieqiMove = null;
+        pendingJieqiPiece = 0;
+        pendingJieqiTry = 0;
+    }
+
+    public boolean wasJieqiRollback() {
+        return pendingJieqiRollback;
+    }
+
+    /**
+     * 把我们已走、对方棋盘还没显示的那一手补回帧里。
+     * 超过了 5 秒还不出现，就判定没走成，标记回滚让外面重新分析。
+     */
+    private void absorbPendingInto(char[][] grid, char ourSide, long capturedAt) {
+        if (pendingJieqiMove == null || jieqi == null) {
+            return;
+        }
+        if (System.currentTimeMillis() - pendingJieqiAt > 5000L) {
+            JieqiTrace.log("揭棋连线：这一手 " + pendingJieqiMove
+                    + " 5 秒没在对方棋盘上出现（点击没落下去，或者对方棋盘不认这一步），仍然算我们走，重新分析换一步走");
+            pendingJieqiRollback = true;
+            pendingJieqiStillBefore = false;
+            clearPendingJieqiMove();
+        } else {
+            if (capturedAt > 0L) {
+                pendingJieqiFrameAt = capturedAt;
+            }
+            if (!replayPendingIfMissing(grid, pendingJieqiMove, pendingJieqiPiece)) {
+                pendingJieqiStillBefore = false;
+                clearPendingJieqiMove();
+            } else {
+                pendingJieqiStillBefore = true;
+            }
+        }
+    }
+
+    /**
+     * 若帧里起点还有我们的子（说明那一手还没显示出来），就把 pendingMove 补进帧。
+     *
+     * @return true 表示"对方棋盘仍是走之前的样子"、已把我们的子补上；false 表示帧里已有结果或无法补
+     */
+    static boolean replayPendingIfMissing(char[][] frame, String pendingMove, char pendingPiece) {
+        if (frame == null || pendingMove == null || pendingMove.length() < 4 || !occupiedChar(pendingPiece)) {
+            return false;
+        }
+
+        int[] m;
+        try {
+            m = JieqiPosition.parseIccs(pendingMove);
+        } catch (Exception e) {
+            return false;
+        }
+        if (m == null || m.length < 4) {
+            return false;
+        }
+
+        int fr = m[0];
+        int fc = m[1];
+        int tr = m[2];
+        int tc = m[3];
+        if (fr < 0 || fr > 9 || fc < 0 || fc > 8 || tr < 0 || tr > 9 || tc < 0 || tc > 8) {
+            return false;
+        }
+
+        char atFrom = frame[fr][fc];
+        boolean stillBefore = occupiedChar(atFrom) && JieqiPosition.colorOf(atFrom) == JieqiPosition.colorOf(pendingPiece);
+        if (!stillBefore) {
+            return false;
+        }
+        frame[fr][fc] = '.';
+        frame[tr][tc] = pendingPiece;
+        return true;
+    }
+
+    private static char detectMover(char[][] prev, char[][] now) {
+        return detectMover(prev, now, '\0');
+    }
+
+    /**
+     * 对比前后两帧判断哪一方走了棋：
+     * 统计"少了子"的格子，1~2 个且同一颜色就是走子方；
+     * 两边都少了子（比如吃过子）时，按 ourSide 推断是对方动的（推测法，尽可能合理）。
+     */
+    private static char detectMover(char[][] prev, char[][] now, char ourSide) {
+        if (prev == null || now == null) {
+            return '\0';
+        }
+
+        int sources = 0;
+        char mover = 0;
+        boolean bothSides = false;
+        for (int r = 0; r < 10; r++) {
+            for (int c = 0; c < 9; c++) {
+                char a = prev[r][c];
+                char b = now[r][c];
+                boolean hadA = a != 0 && a != ' ' && a != '.';
+                boolean hasB = b != 0 && b != ' ' && b != '.';
+                if (hadA && !hasB) {
+                    char color = JieqiPosition.colorOf(a);
+                    if (mover != 0 && mover != color) {
+                        bothSides = true;
+                    }
+                    mover = color;
+                    sources++;
+                }
+            }
+        }
+
+        if (sources == 0 || sources > 2) {
+            return '\0';
+        }
+        if (!bothSides) {
+            return mover;
+        }
+        // 两边都动过：应当是对手刚好在我们之后走了一步
+        if (ourSide == 'w') {
+            return 'b';
+        }
+        return ourSide == 'b' ? 'w' : '\0';
+    }
+
+    public String getLastJieqiMove() {
+        return lastJieqiMove;
+    }
+
+    public String getLastJieqiMoveText() {
+        return lastJieqiMoveText;
+    }
+
+    /**
+     * 把含暗子的盘面转成"能正常翻译"的盘面：暗子按其初始方位推断底牌
+     */
+    private char[][] effectiveBoard(char[][] g) {
+        char[][] copy = new char[10][9];
+        for (int r = 0; r < 10; r++) {
+            for (int c = 0; c < 9; c++) {
+                char ch = g[r][c];
+                if (ch != ' ' && ch != '.') {
+                    char t = JieqiPosition.isHiddenPiece(ch) ? JieqiPosition.positionPiece(r, c) : Character.toUpperCase(ch);
+                    if (t == 0) {
+                        t = ' ';
+                    }
+                    copy[r][c] = JieqiPosition.colorOf(ch) == 'w' ? Character.toUpperCase(t) : Character.toLowerCase(t);
+                } else {
+                    copy[r][c] = ' ';
+                }
+            }
+        }
+        return copy;
+    }
+
+    private String describeOnBoard(char[][] g, String iccs) {
+        if (iccs == null || iccs.length() < 4) {
+            return "";
+        }
+        char[][] eff = effectiveBoard(g);
+        StringBuilder sb = new StringBuilder();
+        try {
+            XiangqiUtils.translate(eff, sb, iccs.substring(0, 4), false);
+        } catch (Throwable ignored) {
+            return iccs;
+        }
+        return fixNullName(sb.toString(), eff, iccs);
+    }
+
+    /**
+     * 揭棋的走法文字里会出现 null（牌没翻出来、查不到名字）。
+     * 用棋盘上该子（或"暗子"）的名字把 null 换掉。
+     */
+    private static String fixNullName(String text, char[][] eff, String iccs) {
+        if (text == null || !text.contains("null")) {
+            return text;
+        }
+
+        char piece = ' ';
+        if (iccs != null && iccs.length() >= 4) {
+            int fromI = 9 - (iccs.charAt(1) - '0');
+            int fromJ = iccs.charAt(0) - 'a';
+            if (fromI >= 0 && fromI < 10 && fromJ >= 0 && fromJ < 9) {
+                piece = eff[fromI][fromJ];
+            }
+        }
+
+        String name = XiangqiUtils.map.get(piece);
+        if (name == null || name.isBlank()) {
+            name = "暗子";
+        }
+        return text.replace("null", name);
+    }
+
+    /**
+     * 把一连串着法翻译成文字（用于思考细节的 PV 显示），暗子按推断的底牌翻译
+     */
+    public String describeJieqiPv(List<String> moves) {
+        if (jieqi == null || moves == null || moves.isEmpty()) {
+            return "";
+        }
+
+        char[][] eff = effectiveBoard(jieqi.grid);
+        StringBuilder sb = new StringBuilder();
+        for (String mv : moves) {
+            if (mv == null || mv.length() < 4) {
+                continue;
+            }
+            String m4 = mv.substring(0, 4);
+            try {
+                StringBuilder one = new StringBuilder();
+                XiangqiUtils.translate(eff, one, m4, false);
+                sb.append(fixNullName(one.toString(), eff, m4));
+            } catch (Throwable ignored) {
+                sb.append(m4);
+            }
+            sb.append("  ");
+
+            int fromI = 9 - Integer.parseInt(String.valueOf(m4.charAt(1)));
+            int fromJ = m4.charAt(0) - 'a';
+            int toI = 9 - Integer.parseInt(String.valueOf(m4.charAt(3)));
+            int toJ = m4.charAt(2) - 'a';
+            if (fromI >= 0 && fromI < 10 && toI >= 0 && toI < 10 && fromJ >= 0 && fromJ < 9 && toJ >= 0 && toJ < 9) {
+                eff[toI][toJ] = eff[fromI][fromJ];
+                eff[fromI][fromJ] = ' ';
+            }
+        }
+
+        if (sb.length() >= 2) {
+            sb.setLength(sb.length() - 2);
+        }
+        return sb.toString();
+    }
+
+    /**
+     * 从两帧差分推断走子方走的哪一手（起点是唯一少子的格子）
+     */
+    private String detectMove(char[][] before, char[][] now, char moverColor) {
+        if (before == null || now == null || moverColor == 0) {
+            return null;
+        }
+
+        int fromR = -1;
+        int fromC = -1;
+        int sources = 0;
+        for (int r = 0; r < 10; r++) {
+            for (int c = 0; c < 9; c++) {
+                if (occupiedChar(before[r][c]) && !occupiedChar(now[r][c])) {
+                    sources++;
+                    fromR = r;
+                    fromC = c;
+                }
+            }
+        }
+        if (sources != 1) {
+            return null;
+        }
+
+        List<int[]> cand = new ArrayList<>();
+        for (int r = 0; r < 10; r++) {
+            for (int cx = 0; cx < 9; cx++) {
+                if ((r != fromR || cx != fromC) && before[r][cx] != now[r][cx]
+                        && occupiedChar(now[r][cx]) && JieqiPosition.colorOf(now[r][cx]) == moverColor) {
+                    cand.add(new int[]{r, cx});
+                }
+            }
+        }
+        if (cand.isEmpty()) {
+            return null;
+        }
+
+        // 有多个候选终点时，用合法着法过滤
+        int[] to = cand.get(0);
+        if (cand.size() > 1) {
+            try {
+                for (int[] t : jieqi.legalTargets(fromR, fromC)) {
+                    for (int[] u : cand) {
+                        if (t[0] == u[0] && t[1] == u[1]) {
+                            to = u;
+                            break;
+                        }
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        return JieqiPosition.iccsOf(fromR, fromC, to[0], to[1]);
+    }
+
+    private static boolean occupiedChar(char ch) {
+        return ch != 0 && ch != ' ' && ch != '.';
+    }
+
+    /**
+     * 把揭棋局面同步到绘制用的棋盘数组
+     */
+    private void syncJieqiBoard() {
+        if (jieqi == null) {
+            return;
+        }
+        for (int r = 0; r < 10; r++) {
+            for (int c = 0; c < 9; c++) {
+                char ch = jieqi.grid[r][c];
+                board[r][c] = ch == '.' ? ' ' : ch;
+            }
+        }
+    }
+
+    /**
+     * 揭棋模式下的鼠标点击（选中 / 走子）
+     */
+    private String jieqiClick(int x, int y) {
+        if (jieqi == null) {
+            return null;
+        }
+
+        int padding = boardRender.getPadding(this.boardSize);
+        int piece = boardRender.getPieceSize(this.boardSize);
+        int i = (x - padding) / piece;
+        int j = (y - padding) / piece;
+        int c = boardRender.getReverseX(i, this.isReverse);
+        int r = boardRender.getReverseY(j, this.isReverse);
+        if (r < 0 || r > 9 || c < 0 || c > 8) {
+            return null;
+        }
+
+        JieqiTrace.log("点击像素(" + x + "," + y + ") -> 行" + r + " 列" + c
+                + " 该格=" + displayName(jieqi.grid[r][c])
+                + " 已选=" + (remark == null ? "无" : "行" + remark.y + " 列" + remark.x));
+
+        if (jieqi.over) {
+            jieqiMessage = jieqi.winner == 0 ? "对局已结束（和棋）" : (jieqi.winner == 'w' ? "对局已结束，红胜" : "对局已结束，黑胜");
+            JieqiTrace.log("对局已结束，忽略点击");
+            paint();
+            return null;
+        }
+
+        char clicked = jieqi.grid[r][c];
+        boolean ownPiece = clicked != ' ' && clicked != '.' && JieqiPosition.colorOf(clicked) == jieqi.side;
+        if (remark == null) {
+            if (ownPiece) {
+                if (stepSound) {
+                    sound.pick();
+                }
+                remark = new Point(c, r);
+                jieqiMessage = "";
+                JieqiTrace.log("选中 行" + r + " 列" + c + "（" + displayName(clicked) + "）");
+            } else {
+                jieqiMessage = jieqi.side == 'w' ? "该红方走棋" : "该黑方走棋";
+                JieqiTrace.log("点击空位/对方子，未选中");
+            }
+            paint();
+            return null;
+        }
+
+        int fr = remark.y;
+        int fc = remark.x;
+        if (fr == r && fc == c) {
+            remark = null;
+            paint();
+            return null;
+        }
+        if (ownPiece) {
+            // 改选自己的另一枚子
+            if (stepSound) {
+                sound.pick();
+            }
+            remark = new Point(c, r);
+            paint();
+            return null;
+        }
+
+        boolean legal = false;
+        for (int[] t : jieqi.legalTargets(fr, fc)) {
+            if (t[0] == r && t[1] == c) {
+                legal = true;
+                break;
+            }
+        }
+        if (!legal) {
+            jieqiMessage = "该子不能走到这里";
+            JieqiTrace.log("非法目标 行" + r + " 列" + c + "（选中 行" + fr + " 列" + fc + "）");
+            paint();
+            return null;
+        }
+
+        try {
+            boolean hidden = JieqiPosition.isHiddenPiece(jieqi.grid[fr][fc]);
+            boolean captured = jieqi.grid[r][c] != ' ' && jieqi.grid[r][c] != '.';
+            char moverBefore = jieqi.grid[fr][fc];
+            JieqiPosition.MoveEvent ev = jieqi.makeMove(JieqiPosition.iccsOf(fr, fc, r, c));
+            remark = null;
+            syncJieqiBoard();
+            clearTip();
+
+            StringBuilder msg = new StringBuilder();
+            if (ev.flip != null) {
+                msg.append("翻开 ").append(displayName(ev.flip));
+            } else if (hidden) {
+                msg.append("暗子移动");
+            }
+            if (captured) {
+                if (msg.length() > 0) {
+                    msg.append("，");
+                }
+                msg.append("吃子");
+            }
+            if (ev.check) {
+                if (msg.length() > 0) {
+                    msg.append("，");
+                }
+                msg.append("将军");
+            }
+            if (ev.gameOver) {
+                if (msg.length() > 0) {
+                    msg.append("，");
+                }
+                msg.append(ev.winner == 0 ? "判和" : (ev.winner == 'w' ? "红胜" : "黑胜"));
+            }
+            jieqiMessage = msg.toString();
+
+            JieqiTrace.log("走出 " + JieqiPosition.iccsOf(fr, fc, r, c)
+                    + " 行" + fr + "列" + fc
+                    + "(" + displayName(moverBefore) + ")"
+                    + " -> 行" + r + "列" + c
+                    + " 翻开=" + (ev.flip == null ? "无" : displayName(ev.flip))
+                    + " 吃子=" + captured
+                    + " 将军=" + ev.check
+                    + " 结束=" + ev.gameOver
+                    + " 轮到=" + (jieqi.side == 'w' ? "红" : "黑")
+                    + " 暗子池红" + poolSum(jieqi.poolRed) + "/黑" + poolSum(jieqi.poolBlack)
+                    + JieqiTrace.dump(board));
+
+            if (stepSound) {
+                if (ev.gameOver) {
+                    sound.over();
+                } else if (ev.check) {
+                    sound.check();
+                } else if (captured) {
+                    sound.eat();
+                } else {
+                    sound.move();
+                }
+            }
+        } catch (IllegalArgumentException e) {
+            jieqiMessage = "非法走法";
+            JieqiTrace.log("引擎层拒绝走法: " + e.getMessage());
+        }
+
+        paint();
+        return null;
+    }
+
+    /**
+     * 引擎分析后自动走出的一手（揭棋）
+     *
+     * @return 是否走成功
+     */
+    public boolean playJieqiMove(String iccs) {
+        if (jieqi == null || iccs == null || iccs.length() < 4) {
+            return false;
+        }
+        String mv = iccs.substring(0, 4);
+
+        int[] m;
+        try {
+            m = JieqiPosition.parseIccs(mv);
+        } catch (Exception e) {
+            return false;
+        }
+        if (m == null || m.length < 4) {
+            return false;
+        }
+
+        int fr = m[0];
+        int fc = m[1];
+        int tr = m[2];
+        int tc = m[3];
+        if (fr < 0 || fr > 9 || fc < 0 || fc > 8 || tr < 0 || tr > 9 || tc < 0 || tc > 8) {
+            return false;
+        }
+        if (jieqi.over) {
+            return false;
+        }
+
+        boolean legal = false;
+        for (int[] t : jieqi.legalTargets(fr, fc)) {
+            if (t[0] == tr && t[1] == tc) {
+                legal = true;
+                break;
+            }
+        }
+        if (!legal) {
+            return false;
+        }
+
+        try {
+            boolean hidden = JieqiPosition.isHiddenPiece(jieqi.grid[fr][fc]);
+            boolean captured = jieqi.grid[tr][tc] != ' ' && jieqi.grid[tr][tc] != '.';
+            char moverBefore = jieqi.grid[fr][fc];
+            JieqiPosition.MoveEvent ev = jieqi.makeMove(mv);
+            remark = null;
+            syncJieqiBoard();
+            clearTip();
+
+            // 记录这一手，等对方棋盘出现后再确认
+            pendingJieqiMove = mv;
+            pendingJieqiPiece = jieqi.grid[tr][tc];
+            pendingJieqiAt = System.currentTimeMillis();
+            pendingJieqiClickAt = pendingJieqiAt;
+            pendingJieqiFrameAt = pendingJieqiAt;
+            pendingJieqiStillBefore = false;
+            pendingJieqiTry = 0;
+
+            StringBuilder msg = new StringBuilder();
+            if (ev.flip != null) {
+                msg.append("翻开 ").append(displayName(ev.flip));
+            } else if (hidden) {
+                msg.append("暗子移动");
+            }
+            if (captured) {
+                if (msg.length() > 0) {
+                    msg.append("，");
+                }
+                msg.append("吃子");
+            }
+            if (ev.check) {
+                if (msg.length() > 0) {
+                    msg.append("，");
+                }
+                msg.append("将军");
+            }
+            if (ev.gameOver) {
+                if (msg.length() > 0) {
+                    msg.append("，");
+                }
+                msg.append(ev.winner == 0 ? "判和" : (ev.winner == 'w' ? "红胜" : "黑胜"));
+            }
+            jieqiMessage = msg.toString();
+
+            JieqiTrace.log("引擎自动走子 " + mv
+                    + " 行" + fr + "列" + fc
+                    + "(" + displayName(moverBefore) + ")"
+                    + " -> 行" + tr + "列" + tc
+                    + " 翻开=" + (ev.flip == null ? "无" : displayName(ev.flip))
+                    + " 吃子=" + captured
+                    + " 将军=" + ev.check
+                    + " 结束=" + ev.gameOver
+                    + " 轮到=" + (jieqi.side == 'w' ? "红" : "黑"));
+
+            if (stepSound) {
+                if (ev.gameOver) {
+                    sound.over();
+                } else if (ev.check) {
+                    sound.check();
+                } else if (captured) {
+                    sound.eat();
+                } else {
+                    sound.move();
+                }
+            }
+        } catch (IllegalArgumentException e) {
+            jieqiMessage = "非法走法";
+            JieqiTrace.log("引擎自动走子被拒: " + e.getMessage());
+            paint();
+            return false;
+        }
+
+        paint();
+        return true;
+    }
+
+    /**
+     * 给引擎用的盘面：暗子按初始方位推断成普通棋子
+     */
+    public char[][] jieqiSearchBoard() {
+        char[][] copy = new char[10][9];
+        if (jieqi == null) {
+            return copy;
+        }
+        for (int r = 0; r < 10; r++) {
+            for (int c = 0; c < 9; c++) {
+                char ch = jieqi.grid[r][c];
+                if (ch != ' ' && ch != '.') {
+                    char t = jieqi.effectiveType(r, c);
+                    copy[r][c] = JieqiPosition.colorOf(ch) == 'w' ? Character.toUpperCase(t) : Character.toLowerCase(t);
+                } else {
+                    copy[r][c] = ' ';
+                }
+            }
+        }
+        return copy;
+    }
+
+    public String jieqiSearchFen() {
+        return jieqi == null ? null : fenCode(jieqiSearchBoard(), jieqi.side == 'w');
+    }
+
+    public String jieqiEngineFen() {
+        return jieqi == null ? null : jieqi.engineFen();
+    }
+
+    public boolean jieqiMoveLegal(String iccs) {
+        if (jieqi == null || iccs == null || iccs.length() < 4) {
+            return false;
+        }
+        int[] m = JieqiPosition.parseIccs(iccs.substring(0, 4));
+        for (int[] t : jieqi.legalTargets(m[0], m[1])) {
+            if (t[0] == m[2] && t[1] == m[3]) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public String describeJieqiMove(String iccs) {
+        if (iccs == null || iccs.length() < 4) {
+            return "";
+        }
+        char[][] eff = jieqiSearchBoard();
+        StringBuilder sb = new StringBuilder();
+        try {
+            XiangqiUtils.translate(eff, sb, iccs.substring(0, 4), false);
+        } catch (Exception e) {
+            return iccs;
+        }
+        return fixNullName(sb.toString(), eff, iccs);
+    }
+
+    /**
+     * 棋子的显示名（暗子显示为红暗/黑暗）
+     */
+    public static String displayName(char ch) {
+        if (JieqiPosition.isHiddenPiece(ch)) {
+            return ch == 'X' ? "红暗" : "黑暗";
+        }
+        String word = XiangqiUtils.map.get(ch);
+        return word == null ? String.valueOf(ch) : word;
+    }
+
+    private static int poolSum(Map<Character, Integer> pool) {
+        if (pool == null) {
+            return 0;
+        }
+        int sum = 0;
+        for (int v : pool.values()) {
+            sum += v;
+        }
+        return sum;
+    }
+
+    /**
+     * 状态栏文字（揭棋模式显示走棋方和暗子池）
+     */
+    public String statusText() {
+        if (gameMode == GameMode.JIEQI && jieqi != null) {
+            StringBuilder sb = new StringBuilder("[揭棋] ");
+            sb.append(jieqi.side == 'w' ? "红方走棋" : "黑方走棋");
+            sb.append("　暗子池 红").append(poolSum(jieqi.poolRed)).append(" / 黑").append(poolSum(jieqi.poolBlack));
+            if (jieqiMessage != null && !jieqiMessage.isEmpty()) {
+                sb.append("　").append(jieqiMessage);
+            }
+            return sb.toString();
+        }
+        return "";
+    }
+
     public String mouseClick(int x, int y, boolean canRedGo, boolean canBlackGo) {
+        if (gameMode == GameMode.JIEQI) {
+            return jieqiClick(x, y);
+        }
         int padding = boardRender.getPadding(this.boardSize);
         int piece = boardRender.getPieceSize(this.boardSize);
         int i = (x - padding) / piece;
@@ -320,6 +1225,14 @@ public class ChessBoard {
             Step s = stepForBoard(moveList.get(moveList.size() - 1));
             move(s.getStart().x, s.getStart().y, s.getEnd().x, s.getEnd().y);
         }
+    }
+
+    /**
+     * 清除棋步提示
+     */
+    public void clearTip() {
+        moveTips.clear();
+        paint();
     }
 
     public void setTip(String firstMove, String secondMove, int pv) {

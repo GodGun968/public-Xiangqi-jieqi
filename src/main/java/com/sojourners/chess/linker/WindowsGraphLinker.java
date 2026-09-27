@@ -77,6 +77,23 @@ public class WindowsGraphLinker extends AbstractGraphLinker implements MouseList
         return rectangle;
     }
 
+    /**
+     * 目标窗口标题（揭棋连线自检用：避免连到 TCHESS 自己）
+     */
+    @Override
+    public String getTargetWindowTitle() {
+        if (hwnd == null) {
+            return null;
+        }
+        int len = User32.INSTANCE.GetWindowTextLength(hwnd);
+        if (len <= 0) {
+            return "";
+        }
+        char[] buf = new char[len + 1];
+        User32.INSTANCE.GetWindowText(hwnd, buf, buf.length);
+        return new String(buf).trim();
+    }
+
     private double getScreenScalingFactor() {
         GraphicsEnvironment ge = GraphicsEnvironment.getLocalGraphicsEnvironment();
         GraphicsDevice gd = ge.getDefaultScreenDevice();

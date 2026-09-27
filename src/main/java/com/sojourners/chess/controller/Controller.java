@@ -7,6 +7,9 @@ import com.sojourners.chess.controller.handle.ChessManualCallBack;
 import com.sojourners.chess.controller.handle.ChessManualHandle;
 import com.sojourners.chess.enginee.Engine;
 import com.sojourners.chess.enginee.EngineCallBack;
+import com.sojourners.chess.jieqi.JieqiBoardRecognizer;
+import com.sojourners.chess.jieqi.JieqiPosition;
+import com.sojourners.chess.jieqi.JieqiTrace;
 import com.sojourners.chess.linker.*;
 import com.sojourners.chess.menu.BoardContextMenu;
 import com.sojourners.chess.model.BookData;
@@ -52,7 +55,10 @@ import java.awt.image.RenderedImage;
 import java.io.File;
 import java.io.IOException;
 import java.util.Date;
+import java.util.LinkedHashMap;
 import java.util.List;
+
+import javafx.util.Duration;
 
 public class Controller implements EngineCallBack, LinkerCallBack, ChessManualCallBack {
 
@@ -78,6 +84,17 @@ public class Controller implements EngineCallBack, LinkerCallBack, ChessManualCa
     @FXML
     private ComboBox<String> engineComboBox;
 
+    /**
+     * 对局模式下拉框（象棋 / 揭棋）
+     */
+    @FXML
+    private ComboBox<String> modeComboBox;
+
+    /**
+     * 模式下拉框正在被程序同步选择项（避免触发回调）
+     */
+    private boolean modeComboSyncing;
+
     @FXML
     private ComboBox<String> linkComboBox;
 
@@ -102,6 +119,14 @@ public class Controller implements EngineCallBack, LinkerCallBack, ChessManualCa
     private RadioMenuItem menuOfDefaultBoard;
     @FXML
     private RadioMenuItem menuOfCustomBoard;
+    @FXML
+    private RadioMenuItem menuOfModernBoard;
+    @FXML
+    private RadioMenuItem menuOfWoodBoard;
+    @FXML
+    private RadioMenuItem menuOfDarkBoard;
+    @FXML
+    private RadioMenuItem menuOfJadeBoard;
 
     @FXML
     private CheckMenuItem menuOfStepTip;
@@ -118,6 +143,89 @@ public class Controller implements EngineCallBack, LinkerCallBack, ChessManualCa
 
     @FXML
     private CheckMenuItem menuOfTopWindow;
+
+    /**
+     * 对局模式（象棋 / 揭棋）
+     */
+    @FXML
+    private RadioMenuItem menuOfXiangqiMode;
+    @FXML
+    private RadioMenuItem menuOfJieqiMode;
+
+    /**
+     * 引擎输出日志的节流时间戳
+     */
+    private long lastThinkLog;
+
+    /**
+     * 盘面截图日志的节流时间戳
+     */
+    private long lastSnapshot;
+
+    /**
+     * 揭棋引擎名称
+     */
+    private static final String JIEQI_ENGINE_NAME = "皮卡鱼揭棋";
+
+    /**
+     * 切进揭棋模式前的引擎名（切回象棋时恢复）
+     */
+    private String engineNameBeforeJieqi;
+
+    /**
+     * 连线识别到盘面已翻转（黑方在下）
+     */
+    private boolean jieqiAutoReversed;
+
+    /**
+     * 已记入棋谱的揭棋着法（避免重复记录）
+     */
+    private String lastRecordedJieqiMove;
+
+    /**
+     * 上一次自动点击的揭棋着法（用于重试计数）
+     */
+    private String lastAutoClickedJieqi;
+
+    /**
+     * 同一着法已自动点击的次数
+     */
+    private int jieqiAutoClickTries;
+
+    /**
+     * 上一次因着法不合法而重试分析的局面（避免死循环）
+     */
+    private String lastJieqiRetriedFen;
+
+    /**
+     * 揭棋自动走棋的线程数
+     */
+    private static final int JIEQI_AUTO_THREADS = 6;
+
+    /**
+     * 揭棋自动走棋的哈希表大小（MB）
+     */
+    private static final int JIEQI_AUTO_HASH = 128;
+
+    /**
+     * 揭棋自动走棋的单步最长思考时间（毫秒）
+     */
+    private static final long JIEQI_AUTO_MAX_MS = 2000L;
+
+    /**
+     * 上一次给引擎设置的揭棋线程数
+     */
+    private int lastJieqiThreads = -1;
+
+    /**
+     * 上一次给引擎设置的揭棋思考时间
+     */
+    private long lastJieqiTime = -1L;
+
+    /**
+     * 上一次已送引擎分析的揭棋局面
+     */
+    private String lastJieqiAnalyzedFen;
 
     private Properties prop;
 
@@ -194,15 +302,196 @@ public class Controller implements EngineCallBack, LinkerCallBack, ChessManualCa
         newChessBoard(null);
     }
 
+    /**
+     * 工具栏下拉框选择对局模式
+     */
+    @FXML
+    void modeComboBoxChanged(ActionEvent event) {
+        if (modeComboSyncing || modeComboBox == null) {
+            return;
+        }
+        boolean wantJieqi = modeComboBox.getSelectionModel().getSelectedIndex() == 1;
+        applyGameMode(wantJieqi ? ChessBoard.GameMode.JIEQI : ChessBoard.GameMode.XIANGQI);
+    }
+
+    /**
+     * 菜单里选择对局模式
+     */
+    @FXML
+    void gameModeSelected(ActionEvent event) {
+        RadioMenuItem item = (RadioMenuItem) event.getTarget();
+        ChessBoard.GameMode mode = item == menuOfJieqiMode ? ChessBoard.GameMode.JIEQI : ChessBoard.GameMode.XIANGQI;
+        applyGameMode(mode);
+    }
+
+    /**
+     * 切换对局模式：必要时换引擎、开新局、刷新标题
+     */
+    private void applyGameMode(ChessBoard.GameMode mode) {
+        JieqiTrace.log("用户切换模式: 请求=" + mode + " 当前配置=" + prop.getGameMode());
+        if (prop.getGameMode() == mode) {
+            JieqiTrace.log("模式未变化，忽略");
+            return;
+        }
+        if (mode == ChessBoard.GameMode.JIEQI) {
+            if (!JIEQI_ENGINE_NAME.equals(prop.getEngineName())) {
+                engineNameBeforeJieqi = prop.getEngineName();
+            }
+            if (ensureJieqiEngineConfig()) {
+                prop.setEngineName(JIEQI_ENGINE_NAME);
+                loadEngine(JIEQI_ENGINE_NAME);
+                JieqiTrace.log("揭棋模式：已切换到揭棋引擎（" + JIEQI_ENGINE_NAME + "）");
+            } else {
+                JieqiTrace.log("揭棋模式：没找到揭棋引擎，继续用当前引擎（近似局面）");
+            }
+            refreshEngineComboBox();
+        } else {
+            String xiangqiEngine = findXiangqiEngineName();
+            if (xiangqiEngine != null && !xiangqiEngine.isBlank()) {
+                prop.setEngineName(xiangqiEngine);
+                loadEngine(xiangqiEngine);
+                JieqiTrace.log("象棋模式：已切换到象棋引擎（" + xiangqiEngine + "）");
+                refreshEngineComboBox();
+            }
+        }
+
+        prop.setGameMode(mode);
+        if (mode == ChessBoard.GameMode.JIEQI) {
+            menuOfJieqiMode.setSelected(true);
+        } else {
+            menuOfXiangqiMode.setSelected(true);
+        }
+
+        newChessBoard(null);
+        if (mode == ChessBoard.GameMode.JIEQI) {
+            infoShowLabel.setText(board.statusText());
+            setWindowTitle("　[揭棋]");
+        } else {
+            setWindowTitle(null);
+        }
+
+        JieqiTrace.log("切换完成: 配置=" + prop.getGameMode() + " 棋盘=" + board.getGameMode() + " 暗子数=" + board.hiddenCount());
+    }
+
+    /**
+     * 设置窗口标题（suffix 为空则用默认标题）
+     */
+    private void setWindowTitle(String suffix) {
+        try {
+            if (App.getMainStage() != null) {
+                App.getMainStage().setTitle(App.TITLE + (suffix == null ? "" : suffix));
+            }
+        } catch (Exception e) {
+            // 忽略
+        }
+    }
+
+    /**
+     * 找一个非揭棋的引擎名（切回象棋模式用）
+     */
+    private String findXiangqiEngineName() {
+        try {
+            if (engineNameBeforeJieqi != null && !engineNameBeforeJieqi.isBlank() && !JIEQI_ENGINE_NAME.equals(engineNameBeforeJieqi)) {
+                return engineNameBeforeJieqi;
+            }
+            for (EngineConfig ec : prop.getEngineConfigList()) {
+                if (ec.getName() != null && !JIEQI_ENGINE_NAME.equals(ec.getName())) {
+                    return ec.getName();
+                }
+            }
+        } catch (Throwable e) {
+            JieqiTrace.log("找象棋引擎失败 " + e);
+        }
+        return null;
+    }
+
+    /**
+     * 确保配置里有揭棋引擎；没有就去程序目录找 pikajieqi 自动加上
+     */
+    private boolean ensureJieqiEngineConfig() {
+        try {
+            String base = PathUtils.getJarPath();
+            File f = new File(base + "engine/pikajieqi-bmi2.exe");
+            if (!f.exists()) {
+                f = new File(base + "Windows/pikajieqi-bmi2.exe");
+            }
+            if (!f.exists()) {
+                JieqiTrace.log("没找到揭棋引擎：engine/pikajieqi-bmi2.exe 不存在");
+                return false;
+            }
+            String path = f.getAbsolutePath();
+            for (EngineConfig ec : prop.getEngineConfigList()) {
+                if (JIEQI_ENGINE_NAME.equals(ec.getName())) {
+                    if (!path.equals(ec.getPath())) {
+                        ec.setPath(path);
+                    }
+                    return true;
+                }
+            }
+            prop.getEngineConfigList().add(new EngineConfig(JIEQI_ENGINE_NAME, path, "uci", new LinkedHashMap<>()));
+            JieqiTrace.log("已自动添加揭棋引擎配置: " + JIEQI_ENGINE_NAME + " -> " + path);
+            return true;
+        } catch (Throwable e) {
+            JieqiTrace.log("添加揭棋引擎配置失败: " + e);
+            return false;
+        }
+    }
+
     @FXML
     void boardStyleSelected(ActionEvent event) {
         RadioMenuItem item = (RadioMenuItem) event.getTarget();
         if (item.equals(menuOfDefaultBoard)) {
             prop.setBoardStyle(ChessBoard.BoardStyle.DEFAULT);
+        } else if (item.equals(menuOfModernBoard)) {
+            prop.setBoardStyle(ChessBoard.BoardStyle.MODERN);
+        } else if (item.equals(menuOfWoodBoard)) {
+            prop.setBoardStyle(ChessBoard.BoardStyle.WOOD);
+        } else if (item.equals(menuOfDarkBoard)) {
+            prop.setBoardStyle(ChessBoard.BoardStyle.DARK);
+        } else if (item.equals(menuOfJadeBoard)) {
+            prop.setBoardStyle(ChessBoard.BoardStyle.JADE);
         } else {
             prop.setBoardStyle(ChessBoard.BoardStyle.CUSTOM);
         }
         board.setBoardStyle(prop.getBoardStyle(), this.canvas);
+    }
+
+    /**
+     * 盘面截图存到 log 目录（排查用）
+     */
+    private void dumpBoardSnapshot(String tag) {
+        try {
+            WritableImage img = canvas.snapshot(null, null);
+            File dir = new File(PathUtils.getJarPath() + "log");
+            if (!dir.exists()) {
+                dir.mkdirs();
+            }
+            File f = new File(dir, "board_" + tag + ".png");
+            ImageIO.write(SwingFXUtils.fromFXImage(img, null), "png", f);
+            JieqiTrace.log("已保存盘面截图 " + f.getName() + " (" + (int) img.getWidth() + "x" + (int) img.getHeight() + ")");
+        } catch (Exception e) {
+            JieqiTrace.log("盘面截图失败: " + e);
+        }
+    }
+
+    /**
+     * 刷新工具栏的模式下拉框与提示
+     */
+    private void refreshModeButton() {
+        if (modeComboBox == null) {
+            return;
+        }
+        modeComboSyncing = true;
+        try {
+            if (modeComboBox.getItems().isEmpty()) {
+                modeComboBox.getItems().addAll("象棋", "揭棋");
+            }
+            boolean jieqi = prop.getGameMode() == ChessBoard.GameMode.JIEQI;
+            modeComboBox.getSelectionModel().select(jieqi ? 1 : 0);
+            modeComboBox.setTooltip(tip(jieqi ? "当前：揭棋（换模式会开新局）" : "当前：象棋"));
+        } finally {
+            modeComboSyncing = false;
+        }
     }
 
     @FXML
@@ -419,6 +708,11 @@ public class Controller implements EngineCallBack, LinkerCallBack, ChessManualCa
             return;
         }
 
+        if (board.getGameMode() == ChessBoard.GameMode.JIEQI) {
+            engineGoJieqi();
+            return;
+        }
+
         if (robotRed.getValue() && redGo || robotBlack.getValue() && !redGo) {
             this.isThinking = true;
         } else {
@@ -432,6 +726,45 @@ public class Controller implements EngineCallBack, LinkerCallBack, ChessManualCa
         engine.setHashSize(prop.getHashSize());
         engine.setAnalysisModel(robotAnalysis.getValue() ? Engine.AnalysisModel.INFINITE : prop.getAnalysisModel(), prop.getAnalysisValue());
         engine.analysis(chessManualHandle.getFenCode(), chessManualHandle.getMoveList(), this.board.getBoard(), redGo);
+    }
+
+    /**
+     * 揭棋模式送引擎：装了揭棋引擎就是真 FEN，否则退回普通引擎的行为位次近似
+     */
+    private void engineGoJieqi() {
+        String fen = board.jieqiEngineFen();
+        boolean realEngine = JIEQI_ENGINE_NAME.equals(prop.getEngineName());
+        if (!realEngine) {
+            fen = board.jieqiSearchFen();
+        }
+        if (fen == null) {
+            return;
+        }
+
+        JieqiTrace.log("揭棋模式：送引擎（" + (realEngine ? "揭棋引擎·真 FEN" : "普通引擎·行为位次近似") + "）fen=" + fen + " 分析模式=" + robotAnalysis.getValue());
+        this.isThinking = false;
+        tacticList = null;
+
+        boolean autoPlay = !robotAnalysis.getValue();
+        int threads = Math.max(prop.getThreadNum(), autoPlay ? JIEQI_AUTO_THREADS : 1);
+        int hash = Math.max(prop.getHashSize(), autoPlay ? JIEQI_AUTO_HASH : 16);
+        Engine.AnalysisModel model = prop.getAnalysisModel();
+        long value = prop.getAnalysisValue();
+        if (autoPlay && model == Engine.AnalysisModel.FIXED_TIME && value > JIEQI_AUTO_MAX_MS) {
+            value = JIEQI_AUTO_MAX_MS;
+        }
+
+        engine.setThreadNum(threads);
+        engine.setHashSize(hash);
+        engine.setAnalysisModel(model, value);
+        if (autoPlay && (threads != lastJieqiThreads || value != lastJieqiTime)) {
+            lastJieqiThreads = threads;
+            lastJieqiTime = value;
+            JieqiTrace.log("揭棋自动走棋：引擎用 " + threads + " 线程 / " + hash + "MB 哈希 / " + value + "ms 一步（设置里是 "
+                    + prop.getThreadNum() + " 线程 " + prop.getAnalysisValue() + "ms）");
+        }
+
+        engine.analysis(fen, List.of(), null);
     }
 
     @FXML
@@ -1154,6 +1487,10 @@ public class Controller implements EngineCallBack, LinkerCallBack, ChessManualCa
 
     @Override
     public void bestMove(String first, String second) {
+        if (board.getGameMode() == ChessBoard.GameMode.JIEQI) {
+            bestMoveJieqi(first, second);
+            return;
+        }
         if (redGo && robotRed.getValue() || !redGo && robotBlack.getValue()) {
             ChessBoard.Step s = board.stepForBoard(first);
 
@@ -1172,6 +1509,10 @@ public class Controller implements EngineCallBack, LinkerCallBack, ChessManualCa
 
     @Override
     public void thinkDetail(ThinkData td) {
+        if (board.getGameMode() == ChessBoard.GameMode.JIEQI) {
+            handleJieqiThink(td);
+            return;
+        }
         if (redGo && robotRed.getValue() || !redGo && robotBlack.getValue() || robotAnalysis.getValue()) {
             td.generate(redGo, isReverse.getValue(), board);
             if (td.getValid()) {
@@ -1195,6 +1536,170 @@ public class Controller implements EngineCallBack, LinkerCallBack, ChessManualCa
                 });
             }
         }
+    }
+
+    /**
+     * 揭棋模式下引擎给的着法：合法性校验、走子、连线自动点、棋谱
+     */
+    private void bestMoveJieqi(String first, String second) {
+        if (first == null || first.length() < 4 || !board.jieqiMoveLegal(first)) {
+            // 引擎给的着法不合法/不完整：同一局面只重试一次分析，避免死循环
+            String fenNow = board.jieqiEngineFen();
+            if (fenNow != null && !fenNow.equals(lastJieqiRetriedFen)) {
+                lastJieqiRetriedFen = fenNow;
+                lastJieqiAnalyzedFen = null;
+                JieqiTrace.log("揭棋引擎：着法不合法或不完整（" + first + "），这个局面重新分析一次");
+            }
+            this.isThinking = false;
+            return;
+        }
+
+        String f = first.substring(0, 4);
+        String s = second != null && second.length() >= 4 ? second.substring(0, 4) : null;
+        boolean engineRed = robotRed.getValue();
+        boolean engineBlack = robotBlack.getValue();
+        if (!engineRed && !engineBlack) {
+            // 玩家没手选执子方，按盘面方位推断
+            engineBlack = jieqiAutoReversed;
+            engineRed = !jieqiAutoReversed;
+        }
+        boolean engineTurn = engineRed && redGo || engineBlack && !redGo;
+        JieqiTrace.log("揭棋引擎 bestmove=" + first + " 轮到红=" + redGo + " 自动走子方=" + (engineRed ? "红" : "黑")
+                + "（" + (!robotRed.getValue() && !robotBlack.getValue() ? "按玩家方位推断" : "手选") + "） 会走=" + engineTurn
+                + " 分析模式=" + robotAnalysis.getValue() + " 连线中=" + linkMode.getValue() + " 观战=" + isWatchMode());
+
+        String cn = board.describeJieqiMove(f);
+        Platform.runLater(() -> {
+            if (engineTurn && board.playJieqiMove(f)) {
+                try {
+                    List<String> nextList = chessManualHandle.boardMove(f, cn != null && !cn.isBlank() ? cn : f);
+                    board.setManualList(nextList);
+                    refreshLineChart();
+                } catch (Throwable e) {
+                    JieqiTrace.log("揭棋引擎走子后记棋谱失败 " + e);
+                }
+                if (board.getJieqiPosition() != null) {
+                    redGo = board.getJieqiPosition().side == 'w';
+                }
+                infoShowLabel.setText(board.statusText());
+                JieqiTrace.log("揭棋引擎：已在本地自动走子 " + f + "（" + cn + "）");
+            } else {
+                board.setTip(f, s, 1);
+                infoShowLabel.setText("揭棋推荐: " + board.describeJieqiMove(f));
+            }
+            timeShowLabel.setText(getTimeStrategyString());
+        });
+
+        boolean clickAllowed = engineTurn && linkMode.getValue() && !isWatchMode() && !robotAnalysis.getValue();
+        if (clickAllowed && f.equals(lastAutoClickedJieqi) && jieqiAutoClickTries >= 3) {
+            if (jieqiAutoClickTries == 3) {
+                JieqiTrace.log("揭棋连线：同一手 " + f + " 点了 3 次对方棋盘都没走出去，先停手。请看连线窗口是不是还在那张棋盘上、有没有被别的窗口挡住");
+                infoShowLabel.setText("点了 3 次没走出去，先停手：检查连线窗口是否被遮挡");
+            }
+            jieqiAutoClickTries++;
+            clickAllowed = false;
+        }
+
+        if (clickAllowed) {
+            int[] m = JieqiPosition.parseIccs(f);
+            if (f.equals(lastAutoClickedJieqi)) {
+                jieqiAutoClickTries++;
+            } else {
+                lastAutoClickedJieqi = f;
+                jieqiAutoClickTries = 1;
+            }
+            lastRecordedJieqiMove = f;
+            JieqiTrace.log("揭棋连线：自动走子 " + f + " 从(行" + m[0] + " 列" + m[1] + ") 到(行" + m[2] + " 列" + m[3] + ")");
+            try {
+                graphLinker.autoClick(m[1], m[0], m[3], m[2]);
+            } catch (Exception e) {
+                JieqiTrace.log("揭棋连线：自动走子失败 " + e);
+            }
+        } else if (engineTurn && linkMode.getValue()) {
+            JieqiTrace.log("揭棋连线：轮到我们走，但当前是观战/分析模式，只提示不点（" + f + "）");
+        }
+
+        this.isThinking = false;
+    }
+
+    /**
+     * 揭棋模式的引擎思考输出：只提示合法着法，顺带刷新状态栏与窗口标题
+     */
+    private void handleJieqiThink(ThinkData td) {
+        List<String> detail = td.getDetail();
+        if (detail == null || detail.isEmpty()) {
+            return;
+        }
+        String first = detail.get(0);
+        if (first == null || first.length() < 4) {
+            return;
+        }
+        first = first.substring(0, 4);
+        String second = detail.size() > 1 && detail.get(1) != null && detail.get(1).length() >= 4 ? detail.get(1).substring(0, 4) : null;
+        boolean legal = board.jieqiMoveLegal(first);
+        long now = System.currentTimeMillis();
+        if (now - lastThinkLog > 600) {
+            lastThinkLog = now;
+            JieqiTrace.log("揭棋引擎输出: " + first + " 合法=" + legal + " 深度=" + td.getDepth() + " 分数=" + td.getScore() + " pv=" + td.getPv());
+        }
+
+        // 揭棋的着法不是 ICCS 坐标，生成器会抛异常，失败就用原始着法兜底
+        try {
+            td.generate(redGo, isReverse.getValue(), board);
+            String pvText = jieqiPvText(detail);
+            if (pvText != null && !pvText.isEmpty()) {
+                td.setBody(pvText);
+            }
+            td.setValid(true);
+        } catch (Throwable e) {
+            JieqiTrace.log("揭棋着法列表生成失败 " + e);
+        }
+
+        if (!legal) {
+            return;
+        }
+        final String tipMove = first;
+        Integer score = td.getScore();
+        Platform.runLater(() -> {
+            try {
+                listView.getItems().addFirst(td);
+                if (listView.getItems().size() > 128) {
+                    listView.getItems().removeLast();
+                }
+                board.setTip(tipMove, second, 1);
+                infoShowLabel.setText("揭棋推荐: " + board.describeJieqiMove(tipMove) + (score == null ? "" : "　分数 " + score));
+                timeShowLabel.setText(getTimeStrategyString());
+                setWindowTitle("　[揭棋] 推荐 " + board.describeJieqiMove(tipMove));
+                if (now - lastSnapshot > 3000) {
+                    lastSnapshot = now;
+                    dumpBoardSnapshot("jieqi");
+                }
+            } catch (Exception e) {
+                JieqiTrace.log("揭棋提示失败: " + e);
+            }
+        });
+    }
+
+    /**
+     * 揭棋变招文本（拿不到就返回空串）
+     */
+    private String jieqiPvText(List<String> detail) {
+        try {
+            return board.describeJieqiPv(detail);
+        } catch (Throwable e) {
+            return "";
+        }
+    }
+
+    /**
+     * 统一的工具提示样式
+     */
+    private static Tooltip tip(String text) {
+        Tooltip t = new Tooltip(text);
+        t.setShowDelay(Duration.millis(250));
+        t.setHideDelay(Duration.millis(80));
+        t.setShowDuration(Duration.seconds(20));
+        return t;
     }
 
     private String getTimeStrategyString() {
@@ -1312,6 +1817,130 @@ public class Controller implements EngineCallBack, LinkerCallBack, ChessManualCa
                 } else {
                     goCallBack(move);
                 }
+            }
+        });
+    }
+
+    /**
+     * 揭棋补点看门狗：连着线、还没走出去的那一手，隔一会儿补点一次
+     */
+    private void jieqiRetryTick() {
+        try {
+            if (board == null || graphLinker == null) {
+                return;
+            }
+            if (!linkMode.getValue() || isWatchMode() || robotAnalysis.getValue()) {
+                return;
+            }
+            if (board.getGameMode() != ChessBoard.GameMode.JIEQI) {
+                return;
+            }
+            if (!board.shouldReClickJieqi()) {
+                return;
+            }
+            String pending = board.getPendingJieqiMove();
+            if (pending == null || pending.length() < 4) {
+                return;
+            }
+            int[] pm = JieqiPosition.parseIccs(pending);
+            JieqiTrace.log("揭棋连线：这一手 " + pending + " 对方棋盘上还没走出去，补点第 " + (board.getPendingJieqiTry() + 1) + " 次（看门狗）");
+            board.markJieqiReClicked();
+            graphLinker.autoClick(pm[1], pm[0], pm[3], pm[2]);
+        } catch (Throwable e) {
+            JieqiTrace.log("揭棋补点看门狗异常 " + e);
+        }
+    }
+
+    /**
+     * 盘面上出现的揭棋新着法记进棋谱
+     */
+    private void recordJieqiMoveIfAny() {
+        try {
+            String move = board.getLastJieqiMove();
+            if (move == null || move.equals(lastRecordedJieqiMove)) {
+                return;
+            }
+            String cn = board.getLastJieqiMoveText();
+            if (cn == null || cn.isBlank()) {
+                cn = board.describeJieqiMove(move);
+            }
+            lastRecordedJieqiMove = move;
+            lastAutoClickedJieqi = null;
+            jieqiAutoClickTries = 0;
+            List<String> nextList = chessManualHandle.boardMove(move, cn == null ? move : cn);
+            board.setManualList(nextList);
+            refreshLineChart();
+            if (board.getJieqiPosition() != null) {
+                redGo = board.getJieqiPosition().side == 'w';
+            }
+            JieqiTrace.log("揭棋连线：棋谱记录 " + move + "（" + cn + "）");
+        } catch (Throwable e) {
+            JieqiTrace.log("揭棋连线：棋谱记录失败 " + e);
+        }
+    }
+
+    @Override
+    public boolean isJieqiMode() {
+        return board != null && board.getGameMode() == ChessBoard.GameMode.JIEQI;
+    }
+
+    @Override
+    public void linkerJieqiBoard(char[][] grid) {
+        linkerJieqiBoard(grid, 0L);
+    }
+
+    @Override
+    public void linkerJieqiBoard(char[][] grid, long capturedAt) {
+        // 连线线程回调：盘面同步会画棋盘、趋势图，统一切到 FX 线程执行
+        Platform.runLater(() -> {
+            try {
+                char ourSide = 'w';
+                boolean flip = JieqiBoardRecognizer.isFlipped();
+                board.applyJieqiGrid(grid, ourSide, capturedAt);
+                if (board.wasJieqiRollback()) {
+                    // 这一帧是点了没落下去退回的旧画面，不记棋谱
+                    JieqiTrace.log("揭棋连线：这一帧是点了没落下去退回的旧画面，不记棋谱");
+                } else {
+                    recordJieqiMoveIfAny();
+                }
+                if (flip != jieqiAutoReversed) {
+                    jieqiAutoReversed = flip;
+                    board.reverse(flip);
+                    jieqiRetryTick();
+                    JieqiTrace.log("揭棋连线：盘面方向跟随 JJ 调整（" + (flip ? "翻转，黑方在下" : "常规，红方在下") + "）");
+                }
+                if (board.getJieqiPosition() != null && graphLinker != null && linkMode.getValue() && !isWatchMode() && !robotAnalysis.getValue()) {
+                    engineStop();
+                    JieqiTrace.log("揭棋连线：已同步盘面 -> " + board.statusText());
+                }
+                if (board.getJieqiPosition() != null) {
+                    redGo = board.getJieqiPosition().side == 'w';
+                }
+                String fen = board.jieqiEngineFen();
+                if (fen != null && !fen.equals(lastJieqiAnalyzedFen)) {
+                    boolean ourTurn = board.getJieqiPosition() != null && board.getJieqiPosition().side == ourSide;
+                    lastJieqiAnalyzedFen = fen;
+                    if (!ourTurn && !robotAnalysis.getValue()) {
+                        JieqiTrace.log("揭棋连线：轮到对方走，自动走棋模式不替对方思考（省下一次分析）");
+                    } else {
+                        JieqiTrace.log("揭棋连线：局面有变化，重新分析 fen=" + fen);
+                        engineGo();
+                    }
+                }
+            } catch (Exception e) {
+                JieqiTrace.log("揭棋连线：同步失败 " + e);
+            }
+        });
+    }
+
+    /**
+     * 连线模块给状态栏的提示
+     */
+    @Override
+    public void jieqiLinkMessage(String message) {
+        Platform.runLater(() -> {
+            if (infoShowLabel != null) {
+                infoShowLabel.setText(message);
             }
         });
     }

@@ -2,8 +2,12 @@ package com.sojourners.chess.linker;
 
 import com.sojourners.chess.board.ChessBoard;
 import com.sojourners.chess.config.Properties;
+import com.sojourners.chess.jieqi.JieqiBoardRecognizer;
+import com.sojourners.chess.jieqi.JieqiPosition;
+import com.sojourners.chess.jieqi.JieqiTrace;
 import com.sojourners.chess.util.XiangqiUtils;
 import com.sojourners.chess.yolo.OnnxModel;
+import com.sojourners.chess.yolo.VinYolo5Model;
 import com.sojourners.chess.yolo.Yolo11Model;
 
 import java.awt.*;
@@ -32,6 +36,11 @@ public abstract class AbstractGraphLinker implements GraphLinker, Runnable {
 
     private OnnxModel aiModel;
 
+    /**
+     * 揭棋专用的 VinYolo5 模型（暗子识别）
+     */
+    private OnnxModel vinModel;
+
     private LinkerCallBack callBack;
 
     private Robot robot;
@@ -47,6 +56,7 @@ public abstract class AbstractGraphLinker implements GraphLinker, Runnable {
         robot = new Robot();
         this.count = 0;
         this.aiModel = new Yolo11Model();
+        this.vinModel = new VinYolo5Model();
         this.prop = Properties.getInstance();
         this.pause = false;
     }
@@ -78,6 +88,141 @@ public abstract class AbstractGraphLinker implements GraphLinker, Runnable {
         return true;
     }
 
+    /**
+     * 两帧识别结果是否完全一致
+     */
+    private boolean isSameGrid(char[][] a, char[][] b) {
+        for (int r = 0; r < 10; r++) {
+            for (int c = 0; c < 9; c++) {
+                if (a[r][c] != b[r][c]) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    /**
+     * 揭棋连线扫描：不用象棋那套 findChessBoard/compareBoard，
+     * 直接整盘识别（暗子也是合法状态），盘面稳定两帧就同步。
+     */
+    private void runJieqi() {
+        JieqiTrace.log("揭棋连线：开始");
+        JieqiBoardRecognizer.resetFlipLatch();
+        char[][] prev = null;
+        int noBoard = 0;
+        int frame = 0;
+        int selfLinkWarned = 0;
+        long lastSyncAt = System.currentTimeMillis();
+        boolean stuckWarned = false;
+
+        while (!Thread.currentThread().isInterrupted()) {
+            String targetTitle = getTargetWindowTitle();
+            if (targetTitle != null && targetTitle.toUpperCase().contains("TCHESS")) {
+                // 连到自己了，点出去只会点自家棋盘
+                if (selfLinkWarned < 3) {
+                    selfLinkWarned++;
+                    JieqiTrace.log("揭棋连线：目标窗口是 TCHESS 自己（标题=“" + targetTitle + "”）！连线前请把鼠标点回 JJ象棋 那一窗，不要点 TCHESS");
+                    callBack.jieqiLinkMessage("连到了 TCHESS 自己，请重新连线，鼠标点 JJ象棋 窗口");
+                }
+                boardPos = null;
+                sleep(1000);
+                continue;
+            }
+
+            selfLinkWarned = 0;
+            if (boardPos == null || boardPos.width <= 0) {
+                BufferedImage full = screenshot(true);
+                if (full != null) {
+                    boardPos = JieqiBoardRecognizer.detectBoard(full, this.aiModel, this.vinModel);
+                }
+                if (boardPos == null) {
+                    JieqiTrace.log("揭棋连线：没找到棋盘，1 秒后重试");
+                    sleep(1000);
+                    continue;
+                }
+                double ratio = (double) boardPos.width / (double) Math.max(1, boardPos.height);
+                if (ratio > 1.5) {
+                    JieqiTrace.log("揭棋连线：警告！棋盘框 " + boardPos.width + "x" + boardPos.height
+                            + " 比例异常（" + String.format("%.2f", ratio) + "），像点到了 TCHESS 自己或别的宽窗口，请重新连线并点 JJ象棋 窗口");
+                }
+            }
+
+            sleep(prop.getLinkScanTime());
+            long shotAt = System.currentTimeMillis();
+            BufferedImage img = screenshot(true);
+            if (img == null) {
+                continue;
+            }
+
+            char[][] grid;
+            try {
+                grid = JieqiBoardRecognizer.recognize(img,
+                        boardPos != null ? boardPos : new Rectangle(0, 0, img.getWidth(), img.getHeight()),
+                        this.aiModel, this.vinModel, null);
+            } catch (Exception e) {
+                JieqiTrace.log("揭棋连线：识别异常 " + e);
+                continue;
+            }
+
+            int kings = 0;
+            int revealed = 0;
+            int occupied = 0;
+            for (char[] row : grid) {
+                for (char ch : row) {
+                    if (ch == '.') {
+                        continue;
+                    }
+                    occupied++;
+                    if (ch == 'K' || ch == 'k') {
+                        kings++;
+                    } else if (!JieqiPosition.isHiddenPiece(ch)) {
+                        revealed++;
+                    }
+                }
+            }
+
+            frame++;
+            if (frame == 1 || frame % 20 == 0) {
+                JieqiBoardRecognizer.debugDump(img, boardPos, frame);
+            }
+
+            if (kings < 2 && JieqiBoardRecognizer.getLastKingEvidence() < 2) {
+                // 将帅都没认出来，八成是画面不对，连着几次就重新找棋盘
+                if (++noBoard >= 3) {
+                    boardPos = null;
+                    noBoard = 0;
+                    JieqiTrace.log("揭棋连线：连续异常，重新定位棋盘");
+                }
+                sleep(500);
+                continue;
+            }
+
+            noBoard = 0;
+            if (prev != null && isSameGrid(prev, grid) && !pause && !callBack.isThinking()) {
+                callBack.linkerJieqiBoard(grid, shotAt);
+                lastSyncAt = System.currentTimeMillis();
+                stuckWarned = false;
+                JieqiTrace.log("揭棋连线：盘面稳定，已同步（占用=" + occupied + " 明子=" + revealed + " 暗子=" + (occupied - revealed - kings) + "）");
+            }
+            prev = grid;
+
+            long idle = System.currentTimeMillis() - lastSyncAt;
+            if (idle > 5000) {
+                if (!stuckWarned) {
+                    stuckWarned = true;
+                    JieqiTrace.log("揭棋连线：已 " + idle / 1000 + " 秒没能同步出稳定盘面，重新定位棋盘（占用=" + occupied
+                            + " 明子=" + revealed + " 暗子=" + (occupied - revealed - kings) + "）；如果一直这样，请确认连线窗口还是原来的棋盘");
+                    callBack.jieqiLinkMessage("识别不稳定，正在重新定位棋盘…（请确认连线窗口没被遮挡/没换界面）");
+                }
+                boardPos = null;
+                prev = null;
+                JieqiBoardRecognizer.resetFlipLatch();
+                lastSyncAt = System.currentTimeMillis();
+            }
+        }
+    }
+
     public void pause() {
         this.pause = true;
     }
@@ -87,6 +232,11 @@ public abstract class AbstractGraphLinker implements GraphLinker, Runnable {
 
     @Override
     public void run() {
+        // 揭棋模式走单独的扫描流程（暗子是合法状态，识别方式完全不同）
+        if (callBack.isJieqiMode()) {
+            runJieqi();
+            return;
+        }
         while (!Thread.currentThread().isInterrupted()) {
             if (!findBoardPosition()) {
                 sleep(1000);
@@ -598,6 +748,30 @@ public abstract class AbstractGraphLinker implements GraphLinker, Runnable {
         }
     }
     private Point getPosition(int x, int y) {
+        // 揭棋：坐标走识别出来的网格参数（格子中心 + 边缘微调）
+        if (callBack.isJieqiMode()) {
+            JieqiBoardRecognizer.Grid g = JieqiBoardRecognizer.getLastGrid();
+            if (g != null) {
+                int sx = x;
+                int sy = y;
+                if (JieqiBoardRecognizer.isFlipped()) {
+                    sx = 8 - x;
+                    sy = 9 - y;
+                }
+                Point p = new Point((int) (g.x0 + g.dx * (sx + 0.5)), (int) (g.y0 + g.dy * (sy + 0.5)));
+                if (x == 0) {
+                    p.x += 0.2 * g.dx;
+                } else if (x == 8) {
+                    p.x -= 0.2 * g.dx;
+                }
+                if (y == 0) {
+                    p.y += 0.2 * g.dy;
+                } else if (y == 9) {
+                    p.y -= 0.2 * g.dy;
+                }
+                return p;
+            }
+        }
         double pieceWith = boardPos.width / (8 + OnnxModel.PADDING * 2);
         double pieceHeight = boardPos.height / (9 + OnnxModel.PADDING * 2);
         Point p = new Point((int) (boardPos.x + pieceWith * OnnxModel.PADDING + (x * pieceWith)),
@@ -632,7 +806,8 @@ public abstract class AbstractGraphLinker implements GraphLinker, Runnable {
         if (this.aiModel.findChessBoard(img, tmp)) {
             return tmp;
         } else {
-            return null;
+            // 揭棋：暗子挡住常规识别时，用 VinYolo5 再试一次
+            return this.vinModel.findChessBoard(img, tmp) ? tmp : null;
         }
     }
 }

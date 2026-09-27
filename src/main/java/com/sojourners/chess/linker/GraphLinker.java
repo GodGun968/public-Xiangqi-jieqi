@@ -13,6 +13,13 @@ public interface GraphLinker {
 
     Rectangle getTargetWindowPosition();
 
+    /**
+     * 目标窗口标题（揭棋连线自检用：避免连到 TCHESS 自己）
+     */
+    default String getTargetWindowTitle() {
+        return null;
+    }
+
     BufferedImage screenshotByBack(Rectangle windowPos);
 
     BufferedImage screenshotByFront(Rectangle windowPos);

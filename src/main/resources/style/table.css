@@ -1,5 +1,6 @@
 .table-row-cell:selected {
-    -fx-background-color: #87CEEB;
+    -fx-background-color: #CDE4DA;
+    -fx-text-fill: #17473A;
 }
 
 .chart-series-line {

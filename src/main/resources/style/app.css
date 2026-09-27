@@ -1,16 +1,19 @@
 .list-cell:even {
-    -fx-background-color: white;
+    -fx-background-color: #FBFEFD;
+    -fx-text-fill: #2E4B43;
 }
 .list-cell:odd {
-    -fx-background-color: white;
+    -fx-background-color: #F5FAF8;
+    -fx-text-fill: #2E4B43;
 }
 .list-cell:selected {
-    -fx-background-color: #87CEEB;
+    -fx-background-color: #CDE4DA;
+    -fx-text-fill: #17473A;
 }
 
 .notation-tree .virtual-flow,
 .notation-tree .virtual-flow .clipped-container {
-    -fx-background-color: white;
+    -fx-background-color: #FBFEFD;
 }
 
 .notation-tree .tree-cell:even {
@@ -22,7 +25,7 @@
 }
 
 .notation-tree .tree-cell:selected {
-    -fx-background-color: #87CEEB;
+    -fx-background-color: #CDE4DA;
 }
 
 
@@ -41,4 +44,31 @@
     -fx-border-color: #C0C0C0;
     /*-fx-background-insets:  0 0 0 0, 0, 1, 2;*/
 
+}
+
+/*
+ * 工具栏上的"文字按钮"（揭棋 / 揭棋校准 这类）：
+ * 上面的 .button 把所有按钮压成 24x24 且靠背景图显示，文字按钮必须单独放宽并给足颜色。
+ */
+.text-tool-button {
+    -fx-pref-width: 76px;
+    -fx-pref-height: 24px;
+    -fx-min-width: 76px;
+    -fx-background-insets: 2px;
+    -fx-background-radius: 3px;
+    -fx-border-radius: 3px;
+    -fx-padding: 0 6px;
+    -fx-font-size: 12px;
+    /* 青瓷配色，和棋盘一套 */
+    -fx-background-color: #E6F2EC;
+    -fx-border-color: #A9C7B8;
+    -fx-text-fill: #2F6E5A;
+}
+
+.text-tool-button:hover {
+    -fx-background-color: #D3E8E0;
+}
+
+.text-tool-button:pressed {
+    -fx-background-color: #C2DFD3;
 }

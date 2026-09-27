@@ -1,6 +1,8 @@
 .light-theme {
     -tchess-tree-even: #f5f7fa;
     -tchess-tree-odd: #ffffff;
+    /* 整个窗口底色也是淡青，右边面板透明时就是这个色 */
+    -fx-background-color: #F4FAF7;
 }
 
 .light-theme .manual-info-pane {
@@ -13,4 +15,211 @@
 
 .light-theme .negative-score {
     -fx-text-fill: red;
+}
+
+/*
+ * ===== 青瓷配色：菜单栏 / 工具栏 / 下拉菜单 =====
+ * 和"青瓷"棋盘（盘面 #DCEBE3、格线 #7FA593、底色 #F6FBF9、字 #2F6E5A）同一套色，
+ * 浅色主题下整条菜单栏和工具栏都是淡青绿，看着是一套。
+ */
+.light-theme .menu-bar {
+    -fx-background-color: #DFEDE6;
+    -fx-border-color: #BCD6CB;
+    -fx-border-width: 0 0 1px 0;
+}
+
+.light-theme .menu-bar .menu > .label,
+.light-theme .menu-bar .menu-button > .label {
+    -fx-text-fill: #2F6E5A;
+}
+
+.light-theme .menu-bar .menu:hover,
+.light-theme .menu-bar .menu:showing {
+    -fx-background-color: #CDE4DA;
+}
+
+.light-theme .menu-bar .menu:hover > .label,
+.light-theme .menu-bar .menu:showing > .label {
+    -fx-text-fill: #17473A;
+}
+
+.light-theme .tool-bar {
+    /* 一点点渐变：上浅下深，和棋盘一起看着更有层次 */
+    -fx-background-color: linear-gradient(to bottom, #FAFDFB, #EAF4EF 60%, #E2EFE9);
+    -fx-border-color: #BCD6CB;
+    -fx-border-width: 0 0 1px 0;
+    -fx-padding: 3px 4px;
+}
+
+.light-theme .tool-bar .button {
+    -fx-background-color: transparent;
+    -fx-background-radius: 5px;
+    -fx-border-radius: 5px;
+    -fx-border-color: transparent;
+}
+
+.light-theme .tool-bar .button:hover {
+    -fx-background-color: #D9EBE3;
+    -fx-border-color: #A9C7B8;
+}
+
+.light-theme .tool-bar .button:pressed {
+    -fx-background-color: #C2DFD3;
+    -fx-border-color: #7FA593;
+}
+
+.light-theme .context-menu {
+    -fx-background-color: #F8FCFA;
+    -fx-border-color: #BCD6CB;
+}
+
+.light-theme .menu-item > .label {
+    -fx-text-fill: #2E4B43;
+}
+
+.light-theme .menu-item:focused,
+.light-theme .menu-item:hover {
+    -fx-background-color: #D9EBE3;
+}
+
+.light-theme .menu-item:focused > .label,
+.light-theme .menu-item:hover > .label {
+    -fx-text-fill: #17473A;
+}
+
+.light-theme .menu-item:disabled > .label {
+    -fx-text-fill: #9DB3AB;
+}
+
+.light-theme .separator .line {
+    -fx-border-color: #C6DDD3;
+}
+
+.light-theme .combo-box-base {
+    -fx-background-color: #FFFFFF;
+    -fx-background-radius: 4px;
+    -fx-border-color: #A9C7B8;
+    -fx-border-radius: 4px;
+}
+
+.light-theme .combo-box-base:hover {
+    -fx-border-color: #7FA593;
+}
+
+.light-theme .combo-box .list-cell,
+.light-theme .combo-box-popup .list-cell {
+    -fx-text-fill: #2E4B43;
+}
+
+/* ===== 右边面板 / 标签页 / 表格，一起用青瓷配色 ===== */
+.light-theme .split-pane {
+    -fx-background-color: #F4FAF7;
+}
+
+.light-theme .split-pane-divider {
+    -fx-background-color: #DCEAE3;
+    -fx-padding: 1px;
+}
+
+.light-theme .tab-pane {
+    -fx-background-color: #F8FCFA;
+    -fx-tab-min-height: 22px;
+}
+
+.light-theme .tab-pane > .tab-header-area > .tab-header-background {
+    -fx-background-color: #E4F0EA;
+}
+
+.light-theme .tab-pane > .tab-header-area > .headers-region > .tab {
+    -fx-background-color: #EAF4EF;
+    -fx-background-radius: 4px 4px 0 0;
+    -fx-padding: 2px 12px;
+}
+
+.light-theme .tab-pane > .tab-header-area > .headers-region > .tab:selected {
+    -fx-background-color: #F8FCFA;
+}
+
+.light-theme .tab-pane > .tab-header-area > .headers-region > .tab .tab-label {
+    -fx-text-fill: #2F6E5A;
+}
+
+.light-theme .tab-pane > .tab-header-area > .headers-region > .tab:selected .tab-label {
+    -fx-text-fill: #17473A;
+}
+
+.light-theme .tab-pane > .tab-content-area {
+    -fx-background-color: #F8FCFA;
+}
+
+.light-theme .table-view {
+    -fx-background-color: #F8FCFA;
+    -fx-border-color: #C6DDD3;
+    -fx-table-cell-border-color: transparent;
+}
+
+.light-theme .table-view .column-header-background {
+    -fx-background-color: #E4F0EA;
+}
+
+.light-theme .table-view .column-header,
+.light-theme .table-view .filler {
+    -fx-background-color: transparent;
+    -fx-border-color: transparent transparent #C6DDD3 transparent;
+}
+
+.light-theme .table-view .column-header .label {
+    -fx-text-fill: #2F6E5A;
+}
+
+.light-theme .table-view .table-cell {
+    -fx-text-fill: #2E4B43;
+}
+
+.light-theme .table-row-cell {
+    -fx-background-color: #FBFEFD;
+}
+
+.light-theme .table-row-cell:odd {
+    -fx-background-color: #F5FAF8;
+}
+
+.light-theme .tool-bar .label {
+    -fx-text-fill: #2F6E5A;
+}
+
+.light-theme .chart {
+    -fx-background-color: #F8FCFA;
+}
+
+.light-theme .chart-plot-background {
+    -fx-background-color: #FBFEFD;
+}
+
+.light-theme .scroll-bar:vertical,
+.light-theme .scroll-bar:horizontal {
+    -fx-background-color: #F1F8F4;
+}
+
+.light-theme .scroll-bar .thumb {
+    -fx-background-color: #C2DFD3;
+    -fx-background-radius: 4px;
+}
+
+.light-theme .scroll-bar .thumb:hover {
+    -fx-background-color: #A9C7B8;
+}
+
+/* 提示气泡（鼠标停在按钮上显示的那个）——青瓷配色，出现快一点、显示久一点 */
+.tooltip {
+    -fx-background-color: #2F6E5A;
+    -fx-text-fill: #F6FBF9;
+    -fx-background-radius: 5px;
+    -fx-border-radius: 5px;
+    -fx-border-color: #175847;
+    -fx-font-size: 12px;
+    -fx-padding: 4px 8px;
+    -fx-show-delay: 300ms;
+    -fx-show-duration: 8000ms;
+    -fx-hide-delay: 100ms;
 }

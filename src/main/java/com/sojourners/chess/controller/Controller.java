@@ -989,6 +989,11 @@ public class Controller implements EngineCallBack, LinkerCallBack, ChessManualCa
     public void initialize() {
         // 读取配置
         prop = Properties.getInstance();
+        // 启动时重置为象棋模式（揭棋模式不持久化）
+        if (prop.getGameMode() == ChessBoard.GameMode.JIEQI) {
+            prop.setGameMode(ChessBoard.GameMode.XIANGQI);
+            JieqiTrace.log("启动时重置为象棋模式（揭棋模式不持久化）");
+        }
         // 思考细节listView
         listView.setCellFactory(new Callback() {
             @Override
@@ -1166,6 +1171,13 @@ public class Controller implements EngineCallBack, LinkerCallBack, ChessManualCa
         menuOfShowNumber.setSelected(prop.isShowNumber());
         // 显示状态栏
         menuOfShowStatus.setSelected(prop.isLinkShowInfo());
+        // 模式菜单与下拉框：按当前模式同步选中态
+        if (prop.getGameMode() == ChessBoard.GameMode.JIEQI) {
+            menuOfJieqiMode.setSelected(true);
+        } else {
+            menuOfXiangqiMode.setSelected(true);
+        }
+        refreshModeButton();
         // 棋盘大小
         if (prop.getBoardSize() == ChessBoard.BoardSize.LARGE_BOARD) {
             menuOfLargeBoard.setSelected(true);
@@ -1181,6 +1193,14 @@ public class Controller implements EngineCallBack, LinkerCallBack, ChessManualCa
         // 棋盘样式
         if (prop.getBoardStyle() == ChessBoard.BoardStyle.DEFAULT) {
             menuOfDefaultBoard.setSelected(true);
+        } else if (prop.getBoardStyle() == ChessBoard.BoardStyle.MODERN) {
+            menuOfModernBoard.setSelected(true);
+        } else if (prop.getBoardStyle() == ChessBoard.BoardStyle.WOOD) {
+            menuOfWoodBoard.setSelected(true);
+        } else if (prop.getBoardStyle() == ChessBoard.BoardStyle.DARK) {
+            menuOfDarkBoard.setSelected(true);
+        } else if (prop.getBoardStyle() == ChessBoard.BoardStyle.JADE) {
+            menuOfJadeBoard.setSelected(true);
         } else {
             menuOfCustomBoard.setSelected(true);
         }

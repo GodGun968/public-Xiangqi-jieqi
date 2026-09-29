@@ -1,5 +1,6 @@
 package com.sojourners.chess.board;
 
+import com.sojourners.chess.jieqi.JieqiPosition;
 import com.sojourners.chess.util.XiangqiUtils;
 import javafx.scene.canvas.Canvas;
 import javafx.scene.image.Image;
@@ -40,7 +41,15 @@ public class DefaultBoardRender extends BaseBoardRender {
         int r = (piece - piece / 10) / 2;
         for (int i = 0; i < board.length; i++) {
             for (int j = 0; j < board[0].length; j++) {
-                String word = XiangqiUtils.map.get(board[i][j]);
+                char pc = board[i][j];
+                // 揭棋暗子：画成未翻开的圆片，不显示字
+                if (JieqiPosition.isHiddenPiece(pc)) {
+                    int x = pos + piece * getReverseX(j, isReverse);
+                    int y = pos + piece * getReverseY(i, isReverse);
+                    drawHiddenPiece(x, y, r, pc == 'X');
+                    continue;
+                }
+                String word = XiangqiUtils.map.get(pc);
                 if (word != null) {
                     int x = pos + piece * getReverseX(j, isReverse);
                     int y = pos + piece * getReverseY(i, isReverse);
